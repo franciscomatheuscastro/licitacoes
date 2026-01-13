@@ -48,7 +48,7 @@ export default function Results() {
   const [pageSize, setPageSize] = useState(50);
   const [hasMore, setHasMore] = useState(true);
 
-  const MAX_PAGES = 40;
+  const MAX_PAGES = 100;
 
   const uiFilters = useMemo(() => {
     const include = splitTerms(sp.get("include") || "");
