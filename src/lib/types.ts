@@ -10,6 +10,9 @@ export type Licitacao = {
   prazoEncerramento?: string;
   url?: string;
   fonte: "PNCP";
+
+  // ✅ cache interno (não vem da API)
+  _t?: string;
 };
 
 export type SearchParams = {

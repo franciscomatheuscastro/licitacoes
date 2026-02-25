@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 
 function useDebounced<T>(value: T, ms: number) {
   const [debounced, setDebounced] = useState(value);
@@ -19,50 +20,75 @@ const MODALIDADES = [
   { code: "7", label: "Modalidade 7 (nome aparece nos cards)" },
 ];
 
+type IncludeMode = "any" | "all";
+
 export default function Filters() {
-  const [q, setQ] = useState("");
-  const [uf, setUf] = useState("");
-  const [codigoModalidadeContratacao, setCodigoModalidadeContratacao] = useState("8");
-  const [dataIni, setDataIni] = useState("");
-  const [dataFim, setDataFim] = useState("");
-  const [pageSize, setPageSize] = useState("50");
+  const router = useRouter();
+  const sp = useSearchParams();
+  const qsKey = sp.toString();
 
-  const [includeText, setIncludeText] = useState("");
-  const [excludeText, setExcludeText] = useState("");
+  // ✅ inicializa estado a partir da URL (fonte de verdade)
+  const [q, setQ] = useState(sp.get("q") || "");
+  const [uf, setUf] = useState(sp.get("uf") || "");
+  const [codigoModalidadeContratacao, setCodigoModalidadeContratacao] = useState(
+    sp.get("codigoModalidadeContratacao") || "8"
+  );
+  const [dataIni, setDataIni] = useState(sp.get("dataIni") || "");
+  const [dataFim, setDataFim] = useState(sp.get("dataFim") || "");
+  const [pageSize, setPageSize] = useState(sp.get("pageSize") || "50");
 
-  // ✅ novo: modo do incluir
-  const [includeMode, setIncludeMode] = useState<"any" | "all">("any");
+  const [includeText, setIncludeText] = useState(sp.get("include") || "");
+  const [excludeText, setExcludeText] = useState(sp.get("exclude") || "");
+  const [includeMode, setIncludeMode] = useState<IncludeMode>(
+    (sp.get("includeMode") as IncludeMode) || "any"
+  );
 
+  // ✅ debounces (reduz pancada no backend)
   const dq = useDebounced(q, 400);
+  const dInclude = useDebounced(includeText, 250);
+  const dExclude = useDebounced(excludeText, 250);
+
+  // ✅ se URL mudar por navegação/refresh, reidrata campos (governança)
+  useEffect(() => {
+    setQ(sp.get("q") || "");
+    setUf(sp.get("uf") || "");
+    setCodigoModalidadeContratacao(sp.get("codigoModalidadeContratacao") || "8");
+    setDataIni(sp.get("dataIni") || "");
+    setDataFim(sp.get("dataFim") || "");
+    setPageSize(sp.get("pageSize") || "50");
+    setIncludeText(sp.get("include") || "");
+    setExcludeText(sp.get("exclude") || "");
+    setIncludeMode(((sp.get("includeMode") || "any") as IncludeMode));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qsKey]);
 
   const queryString = useMemo(() => {
-    const sp = new URLSearchParams();
+    const next = new URLSearchParams();
 
-    if (dq) sp.set("q", dq);
-    if (uf) sp.set("uf", uf);
+    if (dq) next.set("q", dq);
+    if (uf) next.set("uf", uf);
 
-    sp.set("codigoModalidadeContratacao", codigoModalidadeContratacao);
+    next.set("codigoModalidadeContratacao", codigoModalidadeContratacao);
 
-    if (dataIni) sp.set("dataIni", dataIni);
-    if (dataFim) sp.set("dataFim", dataFim);
+    if (dataIni) next.set("dataIni", dataIni);
+    if (dataFim) next.set("dataFim", dataFim);
 
     const ps = Math.max(10, Math.min(50, Number(pageSize || 50)));
-    sp.set("pageSize", String(ps));
-    sp.set("page", "1");
+    next.set("pageSize", String(ps));
+    next.set("page", "1");
 
-    if (includeText.trim()) sp.set("include", includeText.trim());
-    if (excludeText.trim()) sp.set("exclude", excludeText.trim());
+    if (dInclude.trim()) next.set("include", dInclude.trim());
+    if (dExclude.trim()) next.set("exclude", dExclude.trim());
 
-    sp.set("includeMode", includeMode);
+    next.set("includeMode", includeMode);
 
-    return sp.toString();
-  }, [dq, uf, codigoModalidadeContratacao, dataIni, dataFim, pageSize, includeText, excludeText, includeMode]);
+    return next.toString();
+  }, [dq, uf, codigoModalidadeContratacao, dataIni, dataFim, pageSize, dInclude, dExclude, includeMode]);
 
+  // ✅ Router-native: atualiza URL sem gambiarra de popstate
   useEffect(() => {
-    const url = `${window.location.pathname}?${queryString}`;
-    window.history.replaceState(null, "", url);
-    window.dispatchEvent(new Event("popstate"));
-  }, [queryString]);
+    router.replace(`?${queryString}`, { scroll: false });
+  }, [queryString, router]);
 
   return (
     <section style={{ display: "grid", gap: 12 }}>
@@ -84,12 +110,17 @@ export default function Filters() {
             value={uf}
             onChange={(e) => setUf(e.target.value.toUpperCase())}
             style={input}
+            maxLength={2}
           />
         </div>
 
         <div style={field}>
           <label style={label}>Modalidade (código)</label>
-          <select value={codigoModalidadeContratacao} onChange={(e) => setCodigoModalidadeContratacao(e.target.value)} style={input}>
+          <select
+            value={codigoModalidadeContratacao}
+            onChange={(e) => setCodigoModalidadeContratacao(e.target.value)}
+            style={input}
+          >
             {MODALIDADES.map((m) => (
               <option key={m.code} value={m.code}>
                 {m.label}
@@ -133,7 +164,7 @@ export default function Filters() {
 
         <div style={field}>
           <label style={label}>Modo do Incluir</label>
-          <select value={includeMode} onChange={(e) => setIncludeMode(e.target.value as any)} style={input}>
+          <select value={includeMode} onChange={(e) => setIncludeMode(e.target.value as IncludeMode)} style={input}>
             <option value="any">QUALQUER (OR) — recomendado</option>
             <option value="all">TODOS (AND) — mais restrito</option>
           </select>

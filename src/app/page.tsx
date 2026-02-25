@@ -24,7 +24,8 @@ export default function Page() {
       style={{
         minHeight: "100vh",
         padding: "42px 18px",
-        background: "radial-gradient(80% 60% at 50% 0%, rgba(34,211,238,0.10), transparent 60%), #050505",
+        background:
+          "radial-gradient(80% 60% at 50% 0%, rgba(34,211,238,0.10), transparent 60%), #050505",
         color: "#EDEDED",
       }}
     >
@@ -36,7 +37,7 @@ export default function Page() {
           MVP para pesquisa e triagem com filtros (fonte: PNCP).
         </p>
 
-        {/* ✅ IMPORTANTÍSSIMO: useSearchParams dentro de Suspense */}
+        {/* ✅ useSearchParams dentro de Suspense */}
         <Suspense fallback={<LoadingBlock />}>
           <div
             style={{

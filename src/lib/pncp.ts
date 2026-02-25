@@ -1,7 +1,8 @@
-import { Licitacao, SearchParams } from "./types";
+import type { Licitacao, SearchParams } from "./types";
 
 const baseUrl = process.env.PNCP_BASE_URL;
 
+// ===== Utils datas =====
 function hojeISO() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -24,7 +25,7 @@ function safePage(page?: string) {
   return Math.max(1, safe);
 }
 
-// PNCP: período máximo 365 dias → quebrar em janelas
+// ===== Split em janelas (PNCP: período máx 365 dias) =====
 function parseYYYYMMDD(s: string) {
   const y = Number(s.slice(0, 4));
   const m = Number(s.slice(4, 6)) - 1;
@@ -56,19 +57,21 @@ function splitIntoWindows(start: string, end: string) {
   return windows;
 }
 
+// ===== Mapping =====
 function mapPncpToLicitacao(it: any): Licitacao {
   const id =
     String(it?.numeroControlePNCP ?? "") ||
     `${it?.orgaoEntidade?.cnpj ?? "semcnpj"}_${it?.anoCompra ?? "0"}_${it?.sequencialCompra ?? "0"}`;
 
+  const valor = Number(it?.valorTotalEstimado ?? 0);
   return {
     id,
     titulo: String(it?.objetoCompra ?? it?.objeto ?? it?.titulo ?? "Sem título"),
     orgao: it?.orgaoEntidade?.razaoSocial ?? undefined,
     uf: it?.unidadeOrgao?.ufSigla ?? it?.orgaoEntidade?.uf ?? undefined,
     municipio: it?.unidadeOrgao?.municipioNome ?? it?.orgaoEntidade?.municipio ?? undefined,
-    modalidade: it?.modalidadeNome ?? undefined, // nome vindo do PNCP
-    valorEstimado: Number(it?.valorTotalEstimado ?? 0) || undefined,
+    modalidade: it?.modalidadeNome ?? undefined,
+    valorEstimado: Number.isFinite(valor) && valor > 0 ? valor : undefined,
     dataPublicacao: it?.dataPublicacaoPncp ?? it?.dataInclusao ?? undefined,
     prazoEncerramento: it?.dataEncerramentoProposta ?? undefined,
     url: it?.linkSistemaOrigem ?? it?.linkProcessoEletronico ?? undefined,
@@ -76,6 +79,109 @@ function mapPncpToLicitacao(it: any): Licitacao {
   };
 }
 
+// ===== Robust fetch (timeout + retry) =====
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function isRetryableStatus(status: number) {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function parseRetryAfterMs(headers: Headers) {
+  const ra = headers.get("Retry-After");
+  if (!ra) return 0;
+  const sec = Number(ra);
+  if (Number.isFinite(sec) && sec > 0) return sec * 1000;
+  return 0;
+}
+
+async function fetchTextWithTimeout(url: string, timeoutMs: number) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store", // ✅ evita cache do Next atrapalhar
+      signal: ctrl.signal,
+    });
+
+    const text = await res.text().catch(() => "");
+    return { res, text };
+  } catch (e: any) {
+    if (e?.name === "AbortError") {
+      throw new Error(`Timeout PNCP após ${timeoutMs}ms`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function fetchPncpJson(url: string, opts?: { timeoutMs?: number; maxAttempts?: number }) {
+  const timeoutMs = opts?.timeoutMs ?? 25_000;
+  const maxAttempts = opts?.maxAttempts ?? 6;
+
+  let lastErr: any = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const { res, text } = await fetchTextWithTimeout(url, timeoutMs);
+
+      if (!res.ok) {
+        const msg = text.slice(0, 300) || res.statusText || "Erro PNCP";
+
+        // retry só se status é típico de instabilidade
+        if (isRetryableStatus(res.status) && attempt < maxAttempts) {
+          const ra = parseRetryAfterMs(res.headers);
+          const backoff = Math.min(20_000, 500 * Math.pow(2, attempt - 1));
+          const jitter = Math.floor(Math.random() * 250);
+          await sleep(Math.max(ra, backoff) + jitter);
+          continue;
+        }
+
+        throw new Error(`PNCP erro ${res.status}: ${msg}`);
+      }
+
+      // parse JSON seguro
+      try {
+        return JSON.parse(text);
+      } catch {
+        // se não for JSON, pode ser erro intermitente da infra
+        if (attempt < maxAttempts) {
+          const backoff = Math.min(20_000, 500 * Math.pow(2, attempt - 1));
+          const jitter = Math.floor(Math.random() * 250);
+          await sleep(backoff + jitter);
+          continue;
+        }
+        throw new Error(`PNCP resposta não-JSON: ${text.slice(0, 200)}`);
+      }
+    } catch (e: any) {
+      lastErr = e;
+
+      const msg = String(e?.message ?? e);
+
+      const retryable =
+        msg.toLowerCase().includes("timeout pncp") ||
+        msg.toLowerCase().includes("fetch failed") ||
+        msg.toLowerCase().includes("network") ||
+        msg.toLowerCase().includes("jdbc") ||
+        msg.toLowerCase().includes("internal server error");
+
+      if (!retryable || attempt === maxAttempts) throw e;
+
+      const backoff = Math.min(20_000, 600 * Math.pow(2, attempt - 1));
+      const jitter = Math.floor(Math.random() * 250);
+      await sleep(backoff + jitter);
+    }
+  }
+
+  throw lastErr;
+}
+
+// ===== Public API =====
 export async function searchPncp(params: SearchParams): Promise<Licitacao[]> {
   if (!baseUrl) throw new Error("PNCP_BASE_URL não definido (.env.local)");
 
@@ -94,6 +200,8 @@ export async function searchPncp(params: SearchParams): Promise<Licitacao[]> {
   const all: Licitacao[] = [];
   const seen = new Set<string>();
 
+  // ✅ Nota: você está pedindo UMA página por chamada.
+  // O loop abaixo só repete pelas janelas de data (quando o período > 365 dias).
   for (const w of windows) {
     const url = new URL(`${baseUrl}/contratacoes/publicacao`);
 
@@ -106,22 +214,13 @@ export async function searchPncp(params: SearchParams): Promise<Licitacao[]> {
     url.searchParams.set("pagina", String(page));
     url.searchParams.set("tamanhoPagina", String(tamanhoPagina));
 
-    const res = await fetch(url.toString(), {
-      next: { revalidate: 60 },
-      headers: { Accept: "application/json" },
+    const json = await fetchPncpJson(url.toString(), {
+      timeoutMs: 25_000,     // ✅ ajustável
+      maxAttempts: 6,        // ✅ retry interno no PNCP
     });
 
-    const text = await res.text().catch(() => "");
-    if (!res.ok) throw new Error(`PNCP erro ${res.status}: ${text.slice(0, 300)}`);
-
-    let json: any;
-    try {
-      json = JSON.parse(text);
-    } catch {
-      throw new Error(`PNCP resposta não-JSON: ${text.slice(0, 200)}`);
-    }
-
     const items = Array.isArray(json?.data) ? json.data : [];
+
     for (const raw of items) {
       const lic = mapPncpToLicitacao(raw);
       if (!seen.has(lic.id)) {
@@ -131,6 +230,5 @@ export async function searchPncp(params: SearchParams): Promise<Licitacao[]> {
     }
   }
 
-  // ✅ sem exclusão automática
   return all;
 }
