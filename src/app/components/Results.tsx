@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useSearchParams } from "next/navigation";
 import type { Licitacao } from "@/lib/types";
 
@@ -38,7 +38,7 @@ export default function Results() {
   const [pageSize, setPageSize] = useState(50);
   const [hasMore, setHasMore] = useState(true);
 
-  const MAX_PAGES = 100;
+  const MAX_PAGES = 200;
 
   // ✅ Anti-race + cancelamento
   const runIdRef = useRef(0);
@@ -54,10 +54,9 @@ export default function Results() {
   const [viewportH, setViewportH] = useState(720);
   const [listTop, setListTop] = useState(0);
 
-  const ITEM_H = 182; // ajuste fino se necessário
+  const ITEM_H = 182;
   const OVERSCAN = 10;
 
-  // ✅ mede altura da viewport
   useEffect(() => {
     const onResize = () => setViewportH(Math.max(420, window.innerHeight));
     onResize();
@@ -65,7 +64,6 @@ export default function Results() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  // ✅ captura scroll do BODY (um scroll só)
   useEffect(() => {
     const onScroll = () => setScrollY(window.scrollY || 0);
     onScroll();
@@ -73,7 +71,6 @@ export default function Results() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  // ✅ calcula o TOP do container no documento (pra virtualização local)
   useEffect(() => {
     const calcTop = () => {
       if (!listRef.current) return;
@@ -98,16 +95,16 @@ export default function Results() {
   }, [qsKey]);
 
   function withCache(it: Licitacao): Licitacao {
-    if (it._t) return it;
+    if ((it as any)._t) return it;
     const text = `${it.titulo} ${it.orgao ?? ""} ${it.modalidade ?? ""} ${it.municipio ?? ""} ${it.uf ?? ""}`;
-    return { ...it, _t: norm(text) };
+    return { ...it, _t: norm(text) } as any;
   }
 
   const applyInterfaceFilters = useCallback(
     (allRaw: Licitacao[]) => {
       const { include, exclude, includeMode } = uiFilters;
 
-      return allRaw.filter((it) => {
+      return allRaw.filter((it: any) => {
         const t = it._t ?? "";
 
         if (include.length > 0) {
@@ -173,7 +170,17 @@ export default function Results() {
   async function fetchPageOnce(nextPage: number, signal: AbortSignal) {
     const apiParams = new URLSearchParams();
 
-    const keys = ["q", "uf", "codigoModalidadeContratacao", "dataIni", "dataFim", "pageSize"];
+    const keys = [
+      "q",
+      "uf",
+      "codigoModalidadeContratacao",
+      "dataIni",
+      "dataFim",
+      "encIni",
+      "encFim",
+      "pageSize",
+    ];
+
     for (const k of keys) {
       const v = sp.get(k);
       if (v) apiParams.set(k, v);
@@ -198,7 +205,12 @@ export default function Results() {
     }
 
     const fetched: Licitacao[] = (data.items || []).map(withCache);
-    const morePossible = fetched.length >= (data.pageSize || ps);
+
+    // ✅ verdade vem do server (bruto do PNCP), fallback fica só como safety net
+    const morePossible =
+      typeof data?.morePossible === "boolean"
+        ? data.morePossible
+        : (data.items || []).length >= (data.pageSize || ps);
 
     return { fetched, morePossible, ps };
   }
@@ -223,7 +235,9 @@ export default function Results() {
         const wait = Math.max(retryAfter, backoff) + jitter;
 
         setError(
-          `PNCP instável (página ${nextPage}). Tentativa ${attempt}/${maxAttempts}. Aguardando ${Math.ceil(wait / 1000)}s...`
+          `PNCP instável (página ${nextPage}). Tentativa ${attempt}/${maxAttempts}. Aguardando ${Math.ceil(
+            wait / 1000
+          )}s...`
         );
 
         await new Promise<void>((r) => setTimeout(() => r(), wait));
@@ -256,7 +270,6 @@ export default function Results() {
     setHasMore(morePossible);
     setPage(1);
 
-    // ✅ volta pro topo (opcional)
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -375,7 +388,7 @@ export default function Results() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [qsKey]);
 
-  // ===== Virtualização pelo scroll do documento =====
+  // ===== Virtualização =====
   const localScroll = Math.max(0, scrollY - listTop);
   const totalH = items.length * ITEM_H;
 
@@ -386,6 +399,9 @@ export default function Results() {
   const visible = items.slice(start, end);
   const padTop = start * ITEM_H;
   const padBot = Math.max(0, totalH - padTop - visible.length * ITEM_H);
+
+  // ✅ mostra botões quando tiver mais páginas (mesmo que página atual tenha 0 itens)
+  const showActions = hasMore && !error;
 
   return (
     <section style={{ marginTop: 8 }}>
@@ -412,9 +428,14 @@ export default function Results() {
         </div>
       )}
 
-      {!loading && !error && items.length === 0 && <div style={box}>Nada encontrado com esses filtros.</div>}
+      {!loading && !error && items.length === 0 && (
+        <div style={box}>
+          {hasMore
+            ? "Nenhum resultado nesta página com esses filtros. Tente “Ver mais” para varrer outras páginas do PNCP."
+            : "Nada encontrado com esses filtros."}
+        </div>
+      )}
 
-      {/* ✅ SEM overflow/altura fixa -> 1 scroll apenas (BODY) */}
       <div ref={listRef} style={{ paddingRight: 6 }}>
         <div style={{ height: padTop }} />
         <div style={{ display: "grid", gap: 12 }}>
@@ -446,7 +467,7 @@ export default function Results() {
       </div>
 
       <div style={{ marginTop: 14, display: "flex", justifyContent: "center", gap: 10, flexWrap: "wrap" }}>
-        {hasMore && rawItems.length > 0 && (
+        {showActions && (
           <>
             <button onClick={onLoadMore} disabled={loadingMore || loadingAll || loading} style={btn}>
               {loadingMore ? "Carregando..." : `Ver mais ( +${pageSize} )`}

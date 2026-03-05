@@ -34,6 +34,11 @@ function keyFromParams(p: SearchParams) {
   if (p.codigoModalidadeContratacao) sp.set("codigoModalidadeContratacao", p.codigoModalidadeContratacao);
   if (p.dataIni) sp.set("dataIni", p.dataIni);
   if (p.dataFim) sp.set("dataFim", p.dataFim);
+
+  // ✅ Encerramento
+  if (p.encIni) sp.set("encIni", p.encIni);
+  if (p.encFim) sp.set("encFim", p.encFim);
+
   sp.set("page", String(p.page ?? "1"));
   sp.set("pageSize", String(p.pageSize ?? "50"));
   return sp.toString();
@@ -97,6 +102,25 @@ async function withRetry<T>(fn: () => Promise<T>) {
   throw lastErr;
 }
 
+function dateOnlyMs(iso?: string) {
+  if (!iso) return null;
+  const d = iso.slice(0, 10); // aceita "YYYY-MM-DD" ou "YYYY-MM-DDTHH..."
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
+  return new Date(d + "T00:00:00.000Z").getTime();
+}
+
+function inRange(dateIso: string | undefined, ini?: string, fim?: string) {
+  const v = dateOnlyMs(dateIso);
+  if (v == null) return false;
+
+  const a = ini ? dateOnlyMs(ini) : null;
+  const b = fim ? dateOnlyMs(fim) : null;
+
+  if (a != null && v < a) return false;
+  if (b != null && v > b) return false;
+  return true;
+}
+
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
@@ -107,6 +131,11 @@ export async function GET(req: Request) {
       codigoModalidadeContratacao: searchParams.get("codigoModalidadeContratacao") ?? undefined,
       dataIni: searchParams.get("dataIni") ?? undefined,
       dataFim: searchParams.get("dataFim") ?? undefined,
+
+      // ✅ Encerramento
+      encIni: searchParams.get("encIni") ?? undefined,
+      encFim: searchParams.get("encFim") ?? undefined,
+
       page: searchParams.get("page") ?? "1",
       pageSize: searchParams.get("pageSize") ?? "50",
     };
@@ -133,11 +162,29 @@ export async function GET(req: Request) {
 
     const prom = withConcurrency(async () => {
       return await withRetry(async () => {
-        const items = await withTimeout(searchPncp(params), PNCP_TIMEOUT_MS);
+        const itemsRaw = await withTimeout(searchPncp(params), PNCP_TIMEOUT_MS);
+
+        // ✅ bruto do PNCP (antes do filtro)
+        const rawCount = Array.isArray(itemsRaw) ? itemsRaw.length : 0;
+
+        // ✅ “tem mais” deve ser calculado pelo bruto
+        const morePossible = rawCount >= pageSize;
+
+        // ✅ filtro de encerramento (server-side)
+        let items = itemsRaw;
+        if (params.encIni || params.encFim) {
+          items = itemsRaw.filter((it: any) => inRange(it.prazoEncerramento, params.encIni, params.encFim));
+        }
 
         const payload = {
           page,
           pageSize,
+
+          // ✅ novos campos (pra governança do front)
+          rawCount,
+          morePossible,
+
+          // total agora é do conjunto filtrado (faz sentido pro usuário)
           total: items.length,
           items,
         };
@@ -169,8 +216,7 @@ export async function GET(req: Request) {
       { status: pncpUnstable ? 503 : 500 }
     );
 
-    // ✅ dica para o front esperar um pouco
-    if (pncpUnstable) res.headers.set("Retry-After", "2"); // segundos
+    if (pncpUnstable) res.headers.set("Retry-After", "2");
     return res;
   }
 }

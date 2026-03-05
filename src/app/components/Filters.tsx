@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 function useDebounced<T>(value: T, ms: number) {
@@ -33,8 +33,15 @@ export default function Filters() {
   const [codigoModalidadeContratacao, setCodigoModalidadeContratacao] = useState(
     sp.get("codigoModalidadeContratacao") || "8"
   );
+
+  // Publicação
   const [dataIni, setDataIni] = useState(sp.get("dataIni") || "");
   const [dataFim, setDataFim] = useState(sp.get("dataFim") || "");
+
+  // ✅ Encerramento
+  const [encIni, setEncIni] = useState(sp.get("encIni") || "");
+  const [encFim, setEncFim] = useState(sp.get("encFim") || "");
+
   const [pageSize, setPageSize] = useState(sp.get("pageSize") || "50");
 
   const [includeText, setIncludeText] = useState(sp.get("include") || "");
@@ -53,9 +60,15 @@ export default function Filters() {
     setQ(sp.get("q") || "");
     setUf(sp.get("uf") || "");
     setCodigoModalidadeContratacao(sp.get("codigoModalidadeContratacao") || "8");
+
     setDataIni(sp.get("dataIni") || "");
     setDataFim(sp.get("dataFim") || "");
+
+    setEncIni(sp.get("encIni") || "");
+    setEncFim(sp.get("encFim") || "");
+
     setPageSize(sp.get("pageSize") || "50");
+
     setIncludeText(sp.get("include") || "");
     setExcludeText(sp.get("exclude") || "");
     setIncludeMode(((sp.get("includeMode") || "any") as IncludeMode));
@@ -73,6 +86,10 @@ export default function Filters() {
     if (dataIni) next.set("dataIni", dataIni);
     if (dataFim) next.set("dataFim", dataFim);
 
+    // ✅ Encerramento
+    if (encIni) next.set("encIni", encIni);
+    if (encFim) next.set("encFim", encFim);
+
     const ps = Math.max(10, Math.min(50, Number(pageSize || 50)));
     next.set("pageSize", String(ps));
     next.set("page", "1");
@@ -83,7 +100,19 @@ export default function Filters() {
     next.set("includeMode", includeMode);
 
     return next.toString();
-  }, [dq, uf, codigoModalidadeContratacao, dataIni, dataFim, pageSize, dInclude, dExclude, includeMode]);
+  }, [
+    dq,
+    uf,
+    codigoModalidadeContratacao,
+    dataIni,
+    dataFim,
+    encIni,
+    encFim,
+    pageSize,
+    dInclude,
+    dExclude,
+    includeMode,
+  ]);
 
   // ✅ Router-native: atualiza URL sem gambiarra de popstate
   useEffect(() => {
@@ -130,14 +159,15 @@ export default function Filters() {
         </div>
       </div>
 
+      {/* Publicação */}
       <div style={grid3}>
         <div style={field}>
-          <label style={label}>Data inicial</label>
+          <label style={label}>Publicado (início)</label>
           <input type="date" value={dataIni} onChange={(e) => setDataIni(e.target.value)} style={input} />
         </div>
 
         <div style={field}>
-          <label style={label}>Data final</label>
+          <label style={label}>Publicado (fim)</label>
           <input type="date" value={dataFim} onChange={(e) => setDataFim(e.target.value)} style={input} />
         </div>
 
@@ -148,6 +178,26 @@ export default function Filters() {
             <option value="20">20 por página</option>
             <option value="50">50 por página</option>
           </select>
+        </div>
+      </div>
+
+      {/* ✅ Encerramento */}
+      <div style={grid3}>
+        <div style={field}>
+          <label style={label}>Encerramento (início)</label>
+          <input type="date" value={encIni} onChange={(e) => setEncIni(e.target.value)} style={input} />
+        </div>
+
+        <div style={field}>
+          <label style={label}>Encerramento (fim)</label>
+          <input type="date" value={encFim} onChange={(e) => setEncFim(e.target.value)} style={input} />
+        </div>
+
+        <div style={field}>
+          <label style={label}> </label>
+          <div style={{ ...hint, marginTop: 2 }}>
+            Dica: use Encerramento para focar em “oportunidades quentes”.
+          </div>
         </div>
       </div>
 
@@ -182,7 +232,8 @@ export default function Filters() {
       </div>
 
       <div style={hint}>
-        Se “Incluir” estiver muito restrito, use <b>QUALQUER (OR)</b>. Assim aparece tudo que contém pelo menos 1 termo.
+        Se “Incluir” estiver muito restrito, use <b style={{ color: "#EDEDED" }}>QUALQUER (OR)</b>. Assim aparece tudo
+        que contém pelo menos 1 termo.
       </div>
     </section>
   );
