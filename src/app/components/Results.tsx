@@ -1,176 +1,134 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+
 import { useSearchParams } from "next/navigation";
+
 import type { Licitacao } from "@/lib/types";
-
-function norm(s: string) {
-  return (s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-}
-
-function splitTerms(s: string) {
-  return (s || "")
-    .split(/[,]+|\s+/)
-    .map((x) => x.trim())
-    .filter(Boolean);
-}
-
-function fmt(v: string) {
-  if (v.length >= 10 && v.includes("-")) return v.slice(0, 10).split("-").reverse().join("/");
-  return v;
-}
 
 type IncludeMode = "any" | "all";
 
-export default function Results() {
-  const sp = useSearchParams();
-  const qsKey = sp.toString();
+type FetchPageResult = {
+  fetched: Licitacao[];
+  morePossible: boolean;
+  pageSize: number;
+};
 
-  const [loading, setLoading] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [loadingAll, setLoadingAll] = useState(false);
+type RequestError = Error & {
+  status?: number;
+  retryAfterMs?: number;
+};
 
-  const [rawItems, setRawItems] = useState<Licitacao[]>([]);
-  const [items, setItems] = useState<Licitacao[]>([]);
-  const [error, setError] = useState<string | null>(null);
+function normalizeText(value: string) {
+  return (value || "")
+    .normalize("NFD")
+    .replace(
+      /[\u0300-\u036f]/g,
+      ""
+    )
+    .toLowerCase()
+    .trim();
+}
 
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
-  const [hasMore, setHasMore] = useState(true);
+function splitTerms(value: string) {
+  return (value || "")
+    .split(/[,;]+|\s+/)
+    .map((term) =>
+      normalizeText(term)
+    )
+    .filter(Boolean);
+}
 
-  const MAX_PAGES = 200;
-
-  // ✅ Anti-race + cancelamento
-  const runIdRef = useRef(0);
-  const abortRef = useRef<AbortController | null>(null);
-
-  // ✅ Dedupe incremental
-  const rawMapRef = useRef<Map<string, Licitacao>>(new Map());
-  const rawListRef = useRef<Licitacao[]>([]);
-
-  // ✅ Virtualização usando scroll da página (SEM scroll interno)
-  const listRef = useRef<HTMLDivElement | null>(null);
-  const [scrollY, setScrollY] = useState(0);
-  const [viewportH, setViewportH] = useState(720);
-  const [listTop, setListTop] = useState(0);
-
-  const ITEM_H = 182;
-  const OVERSCAN = 10;
-
-  useEffect(() => {
-    const onResize = () => setViewportH(Math.max(420, window.innerHeight));
-    onResize();
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
-
-  useEffect(() => {
-    const onScroll = () => setScrollY(window.scrollY || 0);
-    onScroll();
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
-  }, []);
-
-  useEffect(() => {
-    const calcTop = () => {
-      if (!listRef.current) return;
-      const rect = listRef.current.getBoundingClientRect();
-      setListTop(rect.top + (window.scrollY || 0));
-    };
-    calcTop();
-
-    window.addEventListener("resize", calcTop);
-    window.addEventListener("scroll", calcTop, { passive: true });
-    return () => {
-      window.removeEventListener("resize", calcTop);
-      window.removeEventListener("scroll", calcTop as any);
-    };
-  }, []);
-
-  const uiFilters = useMemo(() => {
-    const include = splitTerms(sp.get("include") || "").map(norm);
-    const exclude = splitTerms(sp.get("exclude") || "").map(norm);
-    const includeMode = ((sp.get("includeMode") || "any") as IncludeMode);
-    return { include, exclude, includeMode };
-  }, [qsKey]);
-
-  function withCache(it: Licitacao): Licitacao {
-    if ((it as any)._t) return it;
-    const text = `${it.titulo} ${it.orgao ?? ""} ${it.modalidade ?? ""} ${it.municipio ?? ""} ${it.uf ?? ""}`;
-    return { ...it, _t: norm(text) } as any;
+function formatDate(value: string) {
+  if (
+    value.length >= 10 &&
+    value.includes("-")
+  ) {
+    return value
+      .slice(0, 10)
+      .split("-")
+      .reverse()
+      .join("/");
   }
 
-  const applyInterfaceFilters = useCallback(
-    (allRaw: Licitacao[]) => {
-      const { include, exclude, includeMode } = uiFilters;
+  return value;
+}
 
-      return allRaw.filter((it: any) => {
-        const t = it._t ?? "";
+function wait(
+  milliseconds: number,
+  signal?: AbortSignal
+) {
+  return new Promise<void>(
+    (resolve, reject) => {
+      if (signal?.aborted) {
+        const error = new DOMException(
+          "Operação cancelada",
+          "AbortError"
+        );
 
-        if (include.length > 0) {
-          const ok =
-            includeMode === "all"
-              ? include.every((term) => t.includes(term))
-              : include.some((term) => t.includes(term));
-          if (!ok) return false;
-        }
-
-        if (exclude.length > 0) {
-          const bad = exclude.some((term) => t.includes(term));
-          if (bad) return false;
-        }
-
-        return true;
-      });
-    },
-    [uiFilters]
-  );
-
-  function resetRawStore() {
-    rawMapRef.current = new Map();
-    rawListRef.current = [];
-  }
-
-  function addFetchedIncremental(fetched: Licitacao[]) {
-    const map = rawMapRef.current;
-    const list = rawListRef.current;
-
-    for (const it of fetched) {
-      if (!map.has(it.id)) {
-        map.set(it.id, it);
-        list.push(it);
-      } else {
-        map.set(it.id, it);
+        reject(error);
+        return;
       }
+
+      const timeout = window.setTimeout(
+        () => {
+          signal?.removeEventListener(
+            "abort",
+            handleAbort
+          );
+
+          resolve();
+        },
+        milliseconds
+      );
+
+      function handleAbort() {
+        window.clearTimeout(timeout);
+
+        const error = new DOMException(
+          "Operação cancelada",
+          "AbortError"
+        );
+
+        reject(error);
+      }
+
+      signal?.addEventListener(
+        "abort",
+        handleAbort,
+        {
+          once: true,
+        }
+      );
     }
+  );
+}
 
-    return [...list];
-  }
+export default function Results() {
+  const searchParams =
+    useSearchParams();
 
-  async function safeJson(res: Response) {
-    try {
-      return await res.json();
-    } catch {
-      const txt = await res.text().catch(() => "");
-      return { ok: false, error: txt?.slice(0, 240) || "Resposta inválida" };
-    }
-  }
+  const fullQueryKey =
+    searchParams.toString();
 
-  function isRetryableStatus(status: number) {
-    return status === 503 || status === 500 || status === 429;
-  }
+  /*
+   * Chave contendo somente os filtros que
+   * realmente consultam a API.
+   *
+   * include, exclude e includeMode não entram
+   * aqui, pois são filtros locais.
+   */
+  const apiQueryKey = useMemo(() => {
+    const params =
+      new URLSearchParams();
 
-  function getRetryAfterMs(res: Response) {
-    const ra = res.headers.get("Retry-After");
-    const sec = ra ? Number(ra) : NaN;
-    if (!Number.isNaN(sec) && sec > 0) return sec * 1000;
-    return 0;
-  }
-
-  async function fetchPageOnce(nextPage: number, signal: AbortSignal) {
-    const apiParams = new URLSearchParams();
-
-    const keys = [
+    const apiKeys = [
       "q",
       "uf",
       "codigoModalidadeContratacao",
@@ -181,334 +139,1449 @@ export default function Results() {
       "pageSize",
     ];
 
-    for (const k of keys) {
-      const v = sp.get(k);
-      if (v) apiParams.set(k, v);
+    for (const key of apiKeys) {
+      const value =
+        searchParams.get(key);
+
+      if (value) {
+        params.set(key, value);
+      }
     }
 
-    const ps = Math.max(10, Math.min(50, Number(apiParams.get("pageSize") || "50")));
-    apiParams.set("pageSize", String(ps));
-    apiParams.set("page", String(nextPage));
-    setPageSize(ps);
+    return params.toString();
+  }, [fullQueryKey, searchParams]);
 
-    const res = await fetch(`/api/licitacoes?${apiParams.toString()}`, { signal });
-    const data = await safeJson(res);
+  const interfaceFilters =
+    useMemo(() => {
+      const include = splitTerms(
+        searchParams.get("include") ||
+          ""
+      );
 
-    if (!res.ok || !data.ok) {
-      const errMsg = data?.error || `Falha na busca (HTTP ${res.status})`;
-      const retryAfterMs = getRetryAfterMs(res);
-      const status = res.status || 500;
-      const e: any = new Error(errMsg);
-      e.status = status;
-      e.retryAfterMs = retryAfterMs;
-      throw e;
-    }
+      const exclude = splitTerms(
+        searchParams.get("exclude") ||
+          ""
+      );
 
-    const fetched: Licitacao[] = (data.items || []).map(withCache);
-
-    // ✅ verdade vem do server (bruto do PNCP), fallback fica só como safety net
-    const morePossible =
-      typeof data?.morePossible === "boolean"
-        ? data.morePossible
-        : (data.items || []).length >= (data.pageSize || ps);
-
-    return { fetched, morePossible, ps };
-  }
-
-  async function fetchPageWithRetry(nextPage: number, signal: AbortSignal, maxAttempts = 12) {
-    let lastErr: any = null;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        return await fetchPageOnce(nextPage, signal);
-      } catch (e: any) {
-        lastErr = e;
-        if (e?.name === "AbortError") throw e;
-
-        const status = Number(e?.status || 500);
-        const retryable = isRetryableStatus(status) || String(e?.message || "").toLowerCase().includes("timeout");
-        if (!retryable) throw e;
-
-        const retryAfter = Number(e?.retryAfterMs || 0);
-        const backoff = Math.min(20_000, 600 * Math.pow(2, attempt - 1));
-        const jitter = Math.floor(Math.random() * 250);
-        const wait = Math.max(retryAfter, backoff) + jitter;
-
-        setError(
-          `PNCP instável (página ${nextPage}). Tentativa ${attempt}/${maxAttempts}. Aguardando ${Math.ceil(
-            wait / 1000
-          )}s...`
+      const mode =
+        searchParams.get(
+          "includeMode"
         );
 
-        await new Promise<void>((r) => setTimeout(() => r(), wait));
-      }
-    }
+      const includeMode: IncludeMode =
+        mode === "all"
+          ? "all"
+          : "any";
 
-    throw lastErr;
-  }
+      return {
+        include,
+        exclude,
+        includeMode,
+      };
+    }, [fullQueryKey, searchParams]);
 
-  async function loadFirstPage(runId: number) {
-    setError(null);
-    setHasMore(true);
-    setPage(1);
-    setRawItems([]);
-    setItems([]);
+  const [loading, setLoading] =
+    useState(false);
 
-    resetRawStore();
+  const [
+    loadingMore,
+    setLoadingMore,
+  ] = useState(false);
 
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
+  const [
+    loadingAll,
+    setLoadingAll,
+  ] = useState(false);
 
-    const { fetched, morePossible } = await fetchPageWithRetry(1, controller.signal, 8);
+  const [rawItems, setRawItems] =
+    useState<Licitacao[]>([]);
 
-    if (runId !== runIdRef.current) return;
+  const [items, setItems] =
+    useState<Licitacao[]>([]);
 
-    const mergedRaw = addFetchedIncremental(fetched);
-    setRawItems(mergedRaw);
-    setItems(applyInterfaceFilters(mergedRaw));
-    setHasMore(morePossible);
-    setPage(1);
+  const [error, setError] =
+    useState<string | null>(null);
 
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
+  const [statusMessage, setStatusMessage] =
+    useState<string | null>(null);
 
-  const onLoadMore = async () => {
-    if (loading || loadingAll || loadingMore) return;
+  const [page, setPage] =
+    useState(1);
 
-    const myRun = runIdRef.current;
+  const [pageSize, setPageSize] =
+    useState(50);
 
-    try {
-      setError(null);
-      setLoadingMore(true);
+  const [hasMore, setHasMore] =
+    useState(true);
 
-      abortRef.current?.abort();
-      const controller = new AbortController();
-      abortRef.current = controller;
+  const MAX_PAGES = 200;
 
-      const next = page + 1;
-      const { fetched, morePossible } = await fetchPageWithRetry(next, controller.signal, 8);
+  /*
+   * Controle contra respostas antigas e
+   * cancelamento de requisições.
+   */
+  const runIdRef = useRef(0);
 
-      if (myRun !== runIdRef.current) return;
+  const abortRef =
+    useRef<AbortController | null>(
+      null
+    );
 
-      const mergedRaw = addFetchedIncremental(fetched);
-      setRawItems(mergedRaw);
-      setItems(applyInterfaceFilters(mergedRaw));
-      setHasMore(morePossible);
-      setPage(next);
+  /*
+   * Estrutura incremental para deduplicação.
+   */
+  const rawMapRef = useRef<
+    Map<string, Licitacao>
+  >(new Map());
 
-      await new Promise<void>((r) => requestAnimationFrame(() => r()));
-    } catch (e: any) {
-      if (e?.name === "AbortError") return;
-      setError(e?.message ?? "Erro ao carregar mais");
-      setHasMore(false);
-    } finally {
-      setLoadingMore(false);
-    }
-  };
+  const rawListRef = useRef<
+    Licitacao[]
+  >([]);
 
-  const onLoadAll = async () => {
-    if (loading || loadingAll || loadingMore) return;
+  /*
+   * Virtualização da lista usando o scroll
+   * principal da página.
+   */
+  const listRef =
+    useRef<HTMLDivElement | null>(
+      null
+    );
 
-    const myRun = runIdRef.current;
+  const [scrollY, setScrollY] =
+    useState(0);
 
-    try {
-      setError(null);
-      setLoadingAll(true);
+  const [viewportHeight, setViewportHeight] =
+    useState(720);
 
-      abortRef.current?.abort();
-      const controller = new AbortController();
-      abortRef.current = controller;
+  const [listTop, setListTop] =
+    useState(0);
 
-      let curPage = page;
-      let curHasMore = hasMore;
-
-      let batch = 0;
-
-      while (curHasMore && curPage < MAX_PAGES) {
-        if (myRun !== runIdRef.current) return;
-
-        const next = curPage + 1;
-        const { fetched, morePossible } = await fetchPageWithRetry(next, controller.signal, 14);
-
-        if (myRun !== runIdRef.current) return;
-
-        const mergedRaw = addFetchedIncremental(fetched);
-
-        curPage = next;
-        curHasMore = morePossible;
-
-        setPage(curPage);
-        setHasMore(curHasMore);
-
-        batch++;
-        if (batch >= 4 || !curHasMore || curPage >= MAX_PAGES) {
-          setRawItems(mergedRaw);
-          setItems(applyInterfaceFilters(mergedRaw));
-          batch = 0;
-          await new Promise<void>((r) => requestAnimationFrame(() => r()));
-        }
-
-        await new Promise((r) => setTimeout(r, 140));
-      }
-
-      setError(null);
-    } catch (e: any) {
-      if (e?.name === "AbortError") return;
-      setError(e?.message ?? "Erro ao carregar tudo");
-      setHasMore(false);
-    } finally {
-      setLoadingAll(false);
-    }
-  };
+  const ITEM_HEIGHT = 182;
+  const OVERSCAN = 10;
 
   useEffect(() => {
-    runIdRef.current += 1;
-    const myRun = runIdRef.current;
+    function handleResize() {
+      setViewportHeight(
+        Math.max(
+          420,
+          window.innerHeight
+        )
+      );
+    }
 
-    const run = async () => {
+    handleResize();
+
+    window.addEventListener(
+      "resize",
+      handleResize
+    );
+
+    return () => {
+      window.removeEventListener(
+        "resize",
+        handleResize
+      );
+    };
+  }, []);
+
+  useEffect(() => {
+    function handleScroll() {
+      setScrollY(
+        window.scrollY || 0
+      );
+    }
+
+    handleScroll();
+
+    window.addEventListener(
+      "scroll",
+      handleScroll,
+      {
+        passive: true,
+      }
+    );
+
+    return () => {
+      window.removeEventListener(
+        "scroll",
+        handleScroll
+      );
+    };
+  }, []);
+
+  const calculateListTop =
+    useCallback(() => {
+      if (!listRef.current) {
+        return;
+      }
+
+      const rect =
+        listRef.current.getBoundingClientRect();
+
+      setListTop(
+        rect.top +
+          (window.scrollY || 0)
+      );
+    }, []);
+
+  useEffect(() => {
+    calculateListTop();
+
+    window.addEventListener(
+      "resize",
+      calculateListTop
+    );
+
+    return () => {
+      window.removeEventListener(
+        "resize",
+        calculateListTop
+      );
+    };
+  }, [calculateListTop]);
+
+  useEffect(() => {
+    calculateListTop();
+  }, [
+    items.length,
+    calculateListTop,
+  ]);
+
+  const withSearchCache =
+    useCallback(
+      (
+        item: Licitacao
+      ): Licitacao => {
+        const cachedItem =
+          item as Licitacao & {
+            _t?: string;
+          };
+
+        if (cachedItem._t) {
+          return item;
+        }
+
+        const searchableText = [
+          item.titulo,
+          item.orgao ?? "",
+          item.modalidade ?? "",
+          item.municipio ?? "",
+          item.uf ?? "",
+        ].join(" ");
+
+        return {
+          ...item,
+          _t: normalizeText(
+            searchableText
+          ),
+        } as Licitacao;
+      },
+      []
+    );
+
+  const applyInterfaceFilters =
+    useCallback(
+      (
+        sourceItems: Licitacao[]
+      ) => {
+        const {
+          include,
+          exclude,
+          includeMode,
+        } = interfaceFilters;
+
+        return sourceItems.filter(
+          (item) => {
+            const cachedItem =
+              item as Licitacao & {
+                _t?: string;
+              };
+
+            const searchableText =
+              cachedItem._t ||
+              normalizeText(
+                [
+                  item.titulo,
+                  item.orgao ?? "",
+                  item.modalidade ?? "",
+                  item.municipio ?? "",
+                  item.uf ?? "",
+                ].join(" ")
+              );
+
+            if (
+              include.length > 0
+            ) {
+              const includeMatches =
+                includeMode === "all"
+                  ? include.every(
+                      (term) =>
+                        searchableText.includes(
+                          term
+                        )
+                    )
+                  : include.some(
+                      (term) =>
+                        searchableText.includes(
+                          term
+                        )
+                    );
+
+              if (!includeMatches) {
+                return false;
+              }
+            }
+
+            if (
+              exclude.length > 0
+            ) {
+              const hasExcludedTerm =
+                exclude.some(
+                  (term) =>
+                    searchableText.includes(
+                      term
+                    )
+                );
+
+              if (hasExcludedTerm) {
+                return false;
+              }
+            }
+
+            return true;
+          }
+        );
+      },
+      [interfaceFilters]
+    );
+
+  function resetRawStore() {
+    rawMapRef.current =
+      new Map();
+
+    rawListRef.current = [];
+  }
+
+  function addFetchedIncremental(
+    fetchedItems: Licitacao[]
+  ) {
+    const map =
+      rawMapRef.current;
+
+    const list =
+      rawListRef.current;
+
+    for (const item of fetchedItems) {
+      const existingItem =
+        map.get(item.id);
+
+      if (!existingItem) {
+        map.set(item.id, item);
+        list.push(item);
+        continue;
+      }
+
+      map.set(item.id, item);
+
+      const existingIndex =
+        list.findIndex(
+          (currentItem) =>
+            currentItem.id === item.id
+        );
+
+      if (existingIndex >= 0) {
+        list[existingIndex] = item;
+      }
+    }
+
+    return [...list];
+  }
+
+  async function safeJson(
+    response: Response
+  ) {
+    const clonedResponse =
+      response.clone();
+
+    try {
+      return await response.json();
+    } catch {
+      const text =
+        await clonedResponse
+          .text()
+          .catch(() => "");
+
+      return {
+        ok: false,
+        error:
+          text.slice(0, 240) ||
+          "Resposta inválida da API.",
+      };
+    }
+  }
+
+  function isRetryableStatus(
+    status: number
+  ) {
+    return (
+      status === 429 ||
+      status === 500 ||
+      status === 502 ||
+      status === 503 ||
+      status === 504
+    );
+  }
+
+  function getRetryAfterMs(
+    response: Response
+  ) {
+    const retryAfter =
+      response.headers.get(
+        "Retry-After"
+      );
+
+    if (!retryAfter) {
+      return 0;
+    }
+
+    const seconds =
+      Number(retryAfter);
+
+    if (
+      Number.isFinite(seconds) &&
+      seconds > 0
+    ) {
+      return seconds * 1000;
+    }
+
+    return 0;
+  }
+
+  const fetchPageOnce =
+    useCallback(
+      async (
+        nextPage: number,
+        signal: AbortSignal
+      ): Promise<FetchPageResult> => {
+        const apiParams =
+          new URLSearchParams(
+            apiQueryKey
+          );
+
+        const parsedPageSize =
+          Number(
+            apiParams.get(
+              "pageSize"
+            ) || "50"
+          );
+
+        const safePageSize =
+          Math.max(
+            10,
+            Math.min(
+              50,
+              Number.isFinite(
+                parsedPageSize
+              )
+                ? parsedPageSize
+                : 50
+            )
+          );
+
+        apiParams.set(
+          "pageSize",
+          String(safePageSize)
+        );
+
+        apiParams.set(
+          "page",
+          String(nextPage)
+        );
+
+        const response =
+          await fetch(
+            `/api/licitacoes?${apiParams.toString()}`,
+            {
+              signal,
+              cache: "no-store",
+            }
+          );
+
+        const data =
+          await safeJson(response);
+
+        if (
+          !response.ok ||
+          !data?.ok
+        ) {
+          const requestError =
+            new Error(
+              data?.error ||
+                `Falha na busca. HTTP ${response.status}.`
+            ) as RequestError;
+
+          requestError.status =
+            response.status || 500;
+
+          requestError.retryAfterMs =
+            getRetryAfterMs(
+              response
+            );
+
+          throw requestError;
+        }
+
+        const fetched: Licitacao[] =
+          (
+            Array.isArray(data.items)
+              ? data.items
+              : []
+          ).map(withSearchCache);
+
+        const morePossible =
+          typeof data.morePossible ===
+          "boolean"
+            ? data.morePossible
+            : fetched.length >=
+              safePageSize;
+
+        setPageSize(
+          safePageSize
+        );
+
+        return {
+          fetched,
+          morePossible,
+          pageSize: safePageSize,
+        };
+      },
+      [
+        apiQueryKey,
+        withSearchCache,
+      ]
+    );
+
+  const fetchPageWithRetry =
+    useCallback(
+      async (
+        nextPage: number,
+        signal: AbortSignal,
+        maxAttempts = 8
+      ): Promise<FetchPageResult> => {
+        let lastError:
+          | RequestError
+          | null = null;
+
+        for (
+          let attempt = 1;
+          attempt <= maxAttempts;
+          attempt++
+        ) {
+          try {
+            return await fetchPageOnce(
+              nextPage,
+              signal
+            );
+          } catch (caughtError) {
+            const requestError =
+              caughtError as RequestError;
+
+            lastError =
+              requestError;
+
+            if (
+              requestError.name ===
+              "AbortError"
+            ) {
+              throw requestError;
+            }
+
+            const status =
+              Number(
+                requestError.status ||
+                  500
+              );
+
+            const message =
+              String(
+                requestError.message ||
+                  ""
+              ).toLowerCase();
+
+            const retryable =
+              isRetryableStatus(
+                status
+              ) ||
+              message.includes(
+                "timeout"
+              ) ||
+              message.includes(
+                "temporariamente"
+              );
+
+            if (!retryable) {
+              throw requestError;
+            }
+
+            if (
+              attempt === maxAttempts
+            ) {
+              break;
+            }
+
+            const retryAfter =
+              Number(
+                requestError.retryAfterMs ||
+                  0
+              );
+
+            const exponentialBackoff =
+              Math.min(
+                15_000,
+                600 *
+                  Math.pow(
+                    2,
+                    attempt - 1
+                  )
+              );
+
+            const jitter =
+              Math.floor(
+                Math.random() *
+                  300
+              );
+
+            const delay =
+              Math.max(
+                retryAfter,
+                exponentialBackoff
+              ) + jitter;
+
+            setStatusMessage(
+              `PNCP instável na página ${nextPage}. Tentativa ${attempt}/${maxAttempts}. Nova tentativa em ${Math.ceil(
+                delay / 1000
+              )} segundos...`
+            );
+
+            await wait(
+              delay,
+              signal
+            );
+          }
+        }
+
+        throw (
+          lastError ||
+          new Error(
+            "Não foi possível consultar o PNCP."
+          )
+        );
+      },
+      [fetchPageOnce]
+    );
+
+  const loadFirstPage =
+    useCallback(
+      async (
+        runId: number
+      ) => {
+        setError(null);
+        setStatusMessage(
+          "Consultando a primeira página do PNCP..."
+        );
+
+        setHasMore(true);
+        setPage(1);
+        setRawItems([]);
+        setItems([]);
+
+        resetRawStore();
+
+        abortRef.current?.abort();
+
+        const controller =
+          new AbortController();
+
+        abortRef.current =
+          controller;
+
+        const {
+          fetched,
+          morePossible,
+        } =
+          await fetchPageWithRetry(
+            1,
+            controller.signal,
+            8
+          );
+
+        if (
+          runId !==
+          runIdRef.current
+        ) {
+          return;
+        }
+
+        const mergedRaw =
+          addFetchedIncremental(
+            fetched
+          );
+
+        setRawItems(mergedRaw);
+
+        setItems(
+          applyInterfaceFilters(
+            mergedRaw
+          )
+        );
+
+        setHasMore(
+          morePossible
+        );
+
+        setPage(1);
+
+        setStatusMessage(null);
+      },
+      [
+        applyInterfaceFilters,
+        fetchPageWithRetry,
+      ]
+    );
+
+  const onLoadMore =
+    useCallback(async () => {
+      if (
+        loading ||
+        loadingAll ||
+        loadingMore ||
+        !hasMore
+      ) {
+        return;
+      }
+
+      const currentRunId =
+        runIdRef.current;
+
+      try {
+        setError(null);
+        setLoadingMore(true);
+
+        const controller =
+          new AbortController();
+
+        abortRef.current?.abort();
+        abortRef.current =
+          controller;
+
+        const nextPage =
+          page + 1;
+
+        setStatusMessage(
+          `Carregando página ${nextPage}...`
+        );
+
+        const {
+          fetched,
+          morePossible,
+        } =
+          await fetchPageWithRetry(
+            nextPage,
+            controller.signal,
+            8
+          );
+
+        if (
+          currentRunId !==
+          runIdRef.current
+        ) {
+          return;
+        }
+
+        const mergedRaw =
+          addFetchedIncremental(
+            fetched
+          );
+
+        setRawItems(mergedRaw);
+
+        setItems(
+          applyInterfaceFilters(
+            mergedRaw
+          )
+        );
+
+        setHasMore(
+          morePossible
+        );
+
+        setPage(nextPage);
+        setStatusMessage(null);
+      } catch (caughtError) {
+        const requestError =
+          caughtError as Error;
+
+        if (
+          requestError.name ===
+          "AbortError"
+        ) {
+          return;
+        }
+
+        setError(
+          requestError.message ||
+            "Erro ao carregar mais resultados."
+        );
+      } finally {
+        setLoadingMore(false);
+      }
+    }, [
+      loading,
+      loadingAll,
+      loadingMore,
+      hasMore,
+      page,
+      fetchPageWithRetry,
+      applyInterfaceFilters,
+    ]);
+
+  const onLoadAll =
+    useCallback(async () => {
+      if (
+        loading ||
+        loadingAll ||
+        loadingMore ||
+        !hasMore
+      ) {
+        return;
+      }
+
+      const currentRunId =
+        runIdRef.current;
+
+      try {
+        setError(null);
+        setLoadingAll(true);
+
+        const controller =
+          new AbortController();
+
+        abortRef.current?.abort();
+        abortRef.current =
+          controller;
+
+        let currentPage: number = page;
+        let morePages: boolean = hasMore;
+
+        let pagesSinceRender = 0;
+
+        while (
+          morePages &&
+          currentPage < MAX_PAGES
+        ) {
+          if (
+            currentRunId !==
+            runIdRef.current
+          ) {
+            return;
+          }
+
+          const nextPage =
+            currentPage + 1;
+
+          setStatusMessage(
+            `Carregando todas as oportunidades: página ${nextPage} de até ${MAX_PAGES}...`
+          );
+
+          const {
+            fetched,
+            morePossible,
+          } =
+            await fetchPageWithRetry(
+              nextPage,
+              controller.signal,
+              10
+            );
+
+          if (
+            currentRunId !==
+            runIdRef.current
+          ) {
+            return;
+          }
+
+          const mergedRaw =
+            addFetchedIncremental(
+              fetched
+            );
+
+          currentPage =
+            nextPage;
+
+          morePages =
+            morePossible;
+
+          setPage(currentPage);
+          setHasMore(morePages);
+
+          pagesSinceRender++;
+
+          if (
+            pagesSinceRender >= 3 ||
+            !morePages ||
+            currentPage >=
+              MAX_PAGES
+          ) {
+            setRawItems(
+              mergedRaw
+            );
+
+            setItems(
+              applyInterfaceFilters(
+                mergedRaw
+              )
+            );
+
+            pagesSinceRender = 0;
+
+            await new Promise<void>(
+              (resolve) => {
+                requestAnimationFrame(
+                  () => resolve()
+                );
+              }
+            );
+          }
+
+          await wait(
+            180,
+            controller.signal
+          );
+        }
+
+        const finalRawItems = [
+          ...rawListRef.current,
+        ];
+
+        setRawItems(
+          finalRawItems
+        );
+
+        setItems(
+          applyInterfaceFilters(
+            finalRawItems
+          )
+        );
+
+        if (
+          currentPage >=
+            MAX_PAGES &&
+          morePages
+        ) {
+          setStatusMessage(
+            `Limite operacional de ${MAX_PAGES} páginas atingido.`
+          );
+        } else {
+          setStatusMessage(
+            "Carregamento concluído."
+          );
+
+          window.setTimeout(() => {
+            setStatusMessage(null);
+          }, 2500);
+        }
+      } catch (caughtError) {
+        const requestError =
+          caughtError as Error;
+
+        if (
+          requestError.name ===
+          "AbortError"
+        ) {
+          return;
+        }
+
+        setError(
+          requestError.message ||
+            "Erro ao carregar todas as páginas."
+        );
+      } finally {
+        setLoadingAll(false);
+      }
+    }, [
+      loading,
+      loadingAll,
+      loadingMore,
+      hasMore,
+      page,
+      fetchPageWithRetry,
+      applyInterfaceFilters,
+    ]);
+
+  /*
+   * Nova busca no PNCP somente quando os
+   * filtros da API mudarem.
+   */
+  useEffect(() => {
+    runIdRef.current += 1;
+
+    const currentRunId =
+      runIdRef.current;
+
+    async function run() {
       try {
         setLoading(true);
         setLoadingAll(false);
         setLoadingMore(false);
-        await loadFirstPage(myRun);
-      } catch (e: any) {
-        if (e?.name === "AbortError") return;
-        setError(e?.message ?? "Erro inesperado");
+
+        await loadFirstPage(
+          currentRunId
+        );
+      } catch (caughtError) {
+        const requestError =
+          caughtError as Error;
+
+        if (
+          requestError.name ===
+          "AbortError"
+        ) {
+          return;
+        }
+
+        setError(
+          requestError.message ||
+            "Erro inesperado ao consultar o PNCP."
+        );
+
         setRawItems([]);
         setItems([]);
         setHasMore(false);
+        setStatusMessage(null);
       } finally {
-        setLoading(false);
+        if (
+          currentRunId ===
+          runIdRef.current
+        ) {
+          setLoading(false);
+        }
       }
+    }
+
+    void run();
+
+    return () => {
+      abortRef.current?.abort();
     };
+  }, [
+    apiQueryKey,
+    loadFirstPage,
+  ]);
 
-    run();
-    return () => abortRef.current?.abort();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [qsKey]);
+  /*
+   * Quando somente include, exclude ou
+   * includeMode mudarem, reaplica o filtro
+   * local sem consultar novamente a API.
+   */
+  useEffect(() => {
+    const currentRawItems = [
+      ...rawListRef.current,
+    ];
 
-  // ===== Virtualização =====
-  const localScroll = Math.max(0, scrollY - listTop);
-  const totalH = items.length * ITEM_H;
+    setRawItems(
+      currentRawItems
+    );
 
-  const start = Math.max(0, Math.floor(localScroll / ITEM_H) - OVERSCAN);
-  const visibleCount = Math.ceil(viewportH / ITEM_H) + OVERSCAN * 2;
-  const end = Math.min(items.length, start + visibleCount);
+    setItems(
+      applyInterfaceFilters(
+        currentRawItems
+      )
+    );
+  }, [
+    applyInterfaceFilters,
+  ]);
 
-  const visible = items.slice(start, end);
-  const padTop = start * ITEM_H;
-  const padBot = Math.max(0, totalH - padTop - visible.length * ITEM_H);
+  const localScroll =
+    Math.max(
+      0,
+      scrollY - listTop
+    );
 
-  // ✅ mostra botões quando tiver mais páginas (mesmo que página atual tenha 0 itens)
-  const showActions = hasMore && !error;
+  const totalHeight =
+    items.length *
+    ITEM_HEIGHT;
+
+  const startIndex =
+    Math.max(
+      0,
+      Math.floor(
+        localScroll /
+          ITEM_HEIGHT
+      ) - OVERSCAN
+    );
+
+  const visibleCount =
+    Math.ceil(
+      viewportHeight /
+        ITEM_HEIGHT
+    ) +
+    OVERSCAN * 2;
+
+  const endIndex =
+    Math.min(
+      items.length,
+      startIndex +
+        visibleCount
+    );
+
+  const visibleItems =
+    items.slice(
+      startIndex,
+      endIndex
+    );
+
+  const paddingTop =
+    startIndex *
+    ITEM_HEIGHT;
+
+  const paddingBottom =
+    Math.max(
+      0,
+      totalHeight -
+        paddingTop -
+        visibleItems.length *
+          ITEM_HEIGHT
+    );
+
+  const showActions =
+    hasMore && !error;
 
   return (
-    <section style={{ marginTop: 8 }}>
+    <section
+      style={{
+        marginTop: 16,
+      }}
+    >
       <div style={resultsHeader}>
-        <h2 style={{ fontSize: 18, fontWeight: 800, margin: 0 }}>Resultados</h2>
-        {loading && <span style={{ color: "#A1A1AA" }}>carregando…</span>}
+        <h2
+          style={{
+            fontSize: 18,
+            fontWeight: 800,
+            margin: 0,
+          }}
+        >
+          Resultados
+        </h2>
+
+        {loading && (
+          <span
+            style={{
+              color: "#A1A1AA",
+              fontSize: 13,
+            }}
+          >
+            Carregando...
+          </span>
+        )}
       </div>
 
-      <div style={{ color: "#A1A1AA", fontSize: 12, marginBottom: 10, display: "flex", gap: 14, flexWrap: "wrap" }}>
+      <div style={metrics}>
         <span>
-          Página: <b style={{ color: "#EDEDED" }}>{page}</b> / {MAX_PAGES}
+          Página:{" "}
+          <strong
+            style={{
+              color: "#EDEDED",
+            }}
+          >
+            {page}
+          </strong>{" "}
+          / {MAX_PAGES}
         </span>
+
         <span>
-          Brutos PNCP: <b style={{ color: "#EDEDED" }}>{rawItems.length}</b>
+          Brutos PNCP:{" "}
+          <strong
+            style={{
+              color: "#EDEDED",
+            }}
+          >
+            {rawItems.length}
+          </strong>
         </span>
+
         <span>
-          Filtrados: <b style={{ color: "#EDEDED" }}>{items.length}</b>
+          Filtrados:{" "}
+          <strong
+            style={{
+              color: "#EDEDED",
+            }}
+          >
+            {items.length}
+          </strong>
         </span>
       </div>
+
+      {statusMessage && (
+        <div style={statusBox}>
+          <span
+            style={{
+              display:
+                "inline-block",
+              marginRight: 8,
+            }}
+          >
+            {loadingAll ||
+            loadingMore ||
+            loading
+              ? "⏳"
+              : "✅"}
+          </span>
+
+          {statusMessage}
+        </div>
+      )}
 
       {error && (
         <div style={boxError}>
-          <b>Erro:</b> {error}
+          <strong>Erro:</strong>{" "}
+          {error}
         </div>
       )}
 
-      {!loading && !error && items.length === 0 && (
-        <div style={box}>
-          {hasMore
-            ? "Nenhum resultado nesta página com esses filtros. Tente “Ver mais” para varrer outras páginas do PNCP."
-            : "Nada encontrado com esses filtros."}
+      {!loading &&
+        !error &&
+        items.length === 0 && (
+          <div style={box}>
+            {hasMore
+              ? "Nenhum resultado filtrado nesta página. Clique em “Ver mais” ou “Carregar tudo” para pesquisar outras páginas do PNCP."
+              : "Nada foi encontrado com os filtros informados."}
+          </div>
+        )}
+
+      <div
+        ref={listRef}
+        style={{
+          paddingRight: 6,
+        }}
+      >
+        <div
+          style={{
+            height: paddingTop,
+          }}
+        />
+
+        <div
+          style={{
+            display: "grid",
+            gap: 12,
+          }}
+        >
+          {visibleItems.map(
+            (item) => (
+              <article
+                key={item.id}
+                style={card}
+              >
+                <div style={rowTop}>
+                  <div style={title}>
+                    {item.titulo}
+                  </div>
+
+                  {item.url && (
+                    <a
+                      href={item.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={cta}
+                    >
+                      Abrir edital →
+                    </a>
+                  )}
+                </div>
+
+                <div style={meta}>
+                  {item.orgao ??
+                    "Órgão não informado"}{" "}
+                  •{" "}
+                  {item.municipio ??
+                    "--"}{" "}
+                  / {item.uf ?? "--"} •{" "}
+                  <strong
+                    style={{
+                      color:
+                        "#EDEDED",
+                    }}
+                  >
+                    {item.modalidade ??
+                      "--"}
+                  </strong>{" "}
+                  • {item.fonte}
+                </div>
+
+                <div style={chips}>
+                  {item.valorEstimado !=
+                    null && (
+                    <span style={chip}>
+                      💰 R${" "}
+                      {item.valorEstimado.toLocaleString(
+                        "pt-BR",
+                        {
+                          minimumFractionDigits:
+                            2,
+                          maximumFractionDigits:
+                            2,
+                        }
+                      )}
+                    </span>
+                  )}
+
+                  {item.dataPublicacao && (
+                    <span style={chip}>
+                      📅 Publicado:{" "}
+                      {formatDate(
+                        item.dataPublicacao
+                      )}
+                    </span>
+                  )}
+
+                  {item.prazoEncerramento && (
+                    <span
+                      style={
+                        chipWarning
+                      }
+                    >
+                      ⏰ Encerra:{" "}
+                      {formatDate(
+                        item.prazoEncerramento
+                      )}
+                    </span>
+                  )}
+                </div>
+              </article>
+            )
+          )}
         </div>
-      )}
 
-      <div ref={listRef} style={{ paddingRight: 6 }}>
-        <div style={{ height: padTop }} />
-        <div style={{ display: "grid", gap: 12 }}>
-          {visible.map((it) => (
-            <article key={it.id} style={card}>
-              <div style={rowTop}>
-                <div style={title}>{it.titulo}</div>
-                {it.url && (
-                  <a href={it.url} target="_blank" rel="noreferrer" style={cta}>
-                    Abrir edital →
-                  </a>
-                )}
-              </div>
-
-              <div style={meta}>
-                {it.orgao ?? "Órgão não informado"} • {it.municipio ?? "--"} / {it.uf ?? "--"} •{" "}
-                <b style={{ color: "#EDEDED" }}>{it.modalidade ?? "--"}</b> • {it.fonte}
-              </div>
-
-              <div style={chips}>
-                {it.valorEstimado != null && <span style={chip}>💰 R$ {it.valorEstimado.toLocaleString("pt-BR")}</span>}
-                {it.dataPublicacao && <span style={chip}>📅 Publicado: {fmt(it.dataPublicacao)}</span>}
-                {it.prazoEncerramento && <span style={chipWarning}>⏰ Encerra: {fmt(it.prazoEncerramento)}</span>}
-              </div>
-            </article>
-          ))}
-        </div>
-        <div style={{ height: padBot }} />
+        <div
+          style={{
+            height:
+              paddingBottom,
+          }}
+        />
       </div>
 
-      <div style={{ marginTop: 14, display: "flex", justifyContent: "center", gap: 10, flexWrap: "wrap" }}>
+      <div style={actions}>
         {showActions && (
           <>
-            <button onClick={onLoadMore} disabled={loadingMore || loadingAll || loading} style={btn}>
-              {loadingMore ? "Carregando..." : `Ver mais ( +${pageSize} )`}
+            <button
+              type="button"
+              onClick={
+                onLoadMore
+              }
+              disabled={
+                loadingMore ||
+                loadingAll ||
+                loading
+              }
+              style={{
+                ...button,
+                opacity:
+                  loadingMore ||
+                  loadingAll ||
+                  loading
+                    ? 0.6
+                    : 1,
+              }}
+            >
+              {loadingMore
+                ? `Carregando página ${
+                    page + 1
+                  }...`
+                : `Ver mais (+${pageSize})`}
             </button>
 
-            <button onClick={onLoadAll} disabled={loadingAll || loadingMore || loading} style={btnPrimary}>
-              {loadingAll ? "Carregando tudo..." : "Carregar tudo (até 100 páginas)"}
+            <button
+              type="button"
+              onClick={
+                onLoadAll
+              }
+              disabled={
+                loadingAll ||
+                loadingMore ||
+                loading
+              }
+              style={{
+                ...buttonPrimary,
+                opacity:
+                  loadingAll ||
+                  loadingMore ||
+                  loading
+                    ? 0.6
+                    : 1,
+              }}
+            >
+              {loadingAll
+                ? `Carregando tudo — página ${page}/${MAX_PAGES}`
+                : `Carregar tudo — até ${MAX_PAGES} páginas`}
             </button>
           </>
         )}
 
-        {!hasMore && rawItems.length > 0 && (
-          <div style={{ color: "#A1A1AA", fontSize: 12 }}>Fim dos resultados para este filtro/período.</div>
-        )}
+        {!hasMore &&
+          rawItems.length > 0 && (
+            <div
+              style={{
+                color:
+                  "#A1A1AA",
+                fontSize: 12,
+              }}
+            >
+              Fim dos resultados para
+              este filtro e período.
+            </div>
+          )}
       </div>
     </section>
   );
 }
 
-// ===== Styles =====
-const resultsHeader: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
+const resultsHeader: React.CSSProperties =
+  {
+    display: "flex",
+    alignItems: "center",
+    justifyContent:
+      "space-between",
+    marginBottom: 10,
+  };
+
+const metrics: React.CSSProperties = {
+  color: "#A1A1AA",
+  fontSize: 12,
   marginBottom: 10,
+  display: "flex",
+  gap: 14,
+  flexWrap: "wrap",
 };
 
 const card: React.CSSProperties = {
+  minHeight: 145,
+  boxSizing: "border-box",
   borderRadius: 16,
   padding: 18,
-  background: "linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03))",
-  border: "1px solid rgba(255,255,255,0.10)",
+  background:
+    "linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03))",
+  border:
+    "1px solid rgba(255,255,255,0.10)",
   color: "#EDEDED",
-  boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+  boxShadow:
+    "0 10px 30px rgba(0,0,0,0.35)",
 };
 
 const rowTop: React.CSSProperties = {
   display: "flex",
   gap: 12,
   alignItems: "flex-start",
-  justifyContent: "space-between",
+  justifyContent:
+    "space-between",
 };
 
 const title: React.CSSProperties = {
@@ -533,22 +1606,27 @@ const chips: React.CSSProperties = {
 };
 
 const chip: React.CSSProperties = {
-  background: "rgba(34,211,238,0.10)",
-  border: "1px solid rgba(34,211,238,0.18)",
+  background:
+    "rgba(34,211,238,0.10)",
+  border:
+    "1px solid rgba(34,211,238,0.18)",
   color: "#CFFAFE",
   padding: "6px 10px",
   borderRadius: 999,
   fontSize: 12,
 };
 
-const chipWarning: React.CSSProperties = {
-  background: "rgba(248,113,113,0.10)",
-  border: "1px solid rgba(248,113,113,0.18)",
-  color: "#FECACA",
-  padding: "6px 10px",
-  borderRadius: 999,
-  fontSize: 12,
-};
+const chipWarning: React.CSSProperties =
+  {
+    background:
+      "rgba(248,113,113,0.10)",
+    border:
+      "1px solid rgba(248,113,113,0.18)",
+    color: "#FECACA",
+    padding: "6px 10px",
+    borderRadius: 999,
+    fontSize: 12,
+  };
 
 const cta: React.CSSProperties = {
   textDecoration: "none",
@@ -557,40 +1635,71 @@ const cta: React.CSSProperties = {
   fontSize: 13,
   padding: "10px 12px",
   borderRadius: 12,
-  border: "1px solid rgba(34,211,238,0.25)",
-  background: "rgba(34,211,238,0.08)",
+  border:
+    "1px solid rgba(34,211,238,0.25)",
+  background:
+    "rgba(34,211,238,0.08)",
   whiteSpace: "nowrap",
 };
 
 const box: React.CSSProperties = {
   marginTop: 10,
+  marginBottom: 10,
   padding: 12,
   borderRadius: 12,
-  background: "rgba(255,255,255,0.04)",
-  border: "1px solid rgba(255,255,255,0.08)",
+  background:
+    "rgba(255,255,255,0.04)",
+  border:
+    "1px solid rgba(255,255,255,0.08)",
   color: "#A1A1AA",
 };
 
+const statusBox: React.CSSProperties =
+  {
+    ...box,
+    border:
+      "1px solid rgba(34,211,238,0.20)",
+    background:
+      "rgba(34,211,238,0.06)",
+    color: "#CFFAFE",
+  };
+
 const boxError: React.CSSProperties = {
   ...box,
-  border: "1px solid rgba(248,113,113,0.20)",
-  background: "rgba(248,113,113,0.08)",
+  border:
+    "1px solid rgba(248,113,113,0.20)",
+  background:
+    "rgba(248,113,113,0.08)",
   color: "#FECACA",
 };
 
-const btn: React.CSSProperties = {
+const actions: React.CSSProperties = {
+  marginTop: 14,
+  display: "flex",
+  justifyContent: "center",
+  alignItems: "center",
+  gap: 10,
+  flexWrap: "wrap",
+};
+
+const button: React.CSSProperties = {
   padding: "12px 14px",
   borderRadius: 14,
-  border: "1px solid rgba(255,255,255,0.14)",
-  background: "rgba(255,255,255,0.06)",
+  border:
+    "1px solid rgba(255,255,255,0.14)",
+  background:
+    "rgba(255,255,255,0.06)",
   color: "#EDEDED",
   cursor: "pointer",
   fontWeight: 800,
 };
 
-const btnPrimary: React.CSSProperties = {
-  ...btn,
-  border: "1px solid rgba(34,211,238,0.25)",
-  background: "rgba(34,211,238,0.10)",
-  color: "#CFFAFE",
-};
+const buttonPrimary: React.CSSProperties =
+  {
+    ...button,
+    border:
+      "1px solid rgba(34,211,238,0.25)",
+    background:
+      "rgba(34,211,238,0.10)",
+    color: "#CFFAFE",
+  };

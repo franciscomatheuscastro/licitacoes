@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+
 import Filters from "@/app/components/Filters";
 import Results from "@/app/components/Results";
 
@@ -13,7 +14,7 @@ function LoadingBlock() {
         color: "#A1A1AA",
       }}
     >
-      Carregando interface…
+      Carregando interface...
     </div>
   );
 }
@@ -29,15 +30,33 @@ export default function Page() {
         color: "#EDEDED",
       }}
     >
-      <div style={{ maxWidth: 1100, margin: "0 auto" }}>
-        <h1 style={{ fontSize: 46, margin: 0, fontWeight: 900, letterSpacing: -0.6 }}>
+      <div
+        style={{
+          maxWidth: 1100,
+          margin: "0 auto",
+        }}
+      >
+        <h1
+          style={{
+            fontSize: 46,
+            margin: 0,
+            fontWeight: 900,
+            letterSpacing: -0.6,
+          }}
+        >
           Radar de Licitações
         </h1>
-        <p style={{ marginTop: 8, marginBottom: 18, color: "#A1A1AA" }}>
+
+        <p
+          style={{
+            marginTop: 8,
+            marginBottom: 18,
+            color: "#A1A1AA",
+          }}
+        >
           MVP para pesquisa e triagem com filtros (fonte: PNCP).
         </p>
 
-        {/* ✅ useSearchParams dentro de Suspense */}
         <Suspense fallback={<LoadingBlock />}>
           <div
             style={{

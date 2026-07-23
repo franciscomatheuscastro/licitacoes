@@ -1,107 +1,256 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import React, {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
-function useDebounced<T>(value: T, ms: number) {
-  const [debounced, setDebounced] = useState(value);
+import {
+  useRouter,
+  useSearchParams,
+} from "next/navigation";
+
+function useDebounced<T>(
+  value: T,
+  delay: number
+): T {
+  const [debounced, setDebounced] =
+    useState(value);
+
   useEffect(() => {
-    const t = setTimeout(() => setDebounced(value), ms);
-    return () => clearTimeout(t);
-  }, [value, ms]);
+    const timeout = window.setTimeout(() => {
+      setDebounced(value);
+    }, delay);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [value, delay]);
+
   return debounced;
 }
 
 const MODALIDADES = [
-  { code: "8", label: "Modalidade 8 (nome aparece nos cards)" },
-  { code: "5", label: "Modalidade 5 (nome aparece nos cards)" },
-  { code: "6", label: "Modalidade 6 (nome aparece nos cards)" },
-  { code: "1", label: "Modalidade 1 (nome aparece nos cards)" },
-  { code: "7", label: "Modalidade 7 (nome aparece nos cards)" },
+  {
+    code: "8",
+    label:
+      "Modalidade 8 (nome aparece nos cards)",
+  },
+  {
+    code: "5",
+    label:
+      "Modalidade 5 (nome aparece nos cards)",
+  },
+  {
+    code: "6",
+    label:
+      "Modalidade 6 (nome aparece nos cards)",
+  },
+  {
+    code: "1",
+    label:
+      "Modalidade 1 (nome aparece nos cards)",
+  },
+  {
+    code: "7",
+    label:
+      "Modalidade 7 (nome aparece nos cards)",
+  },
 ];
 
 type IncludeMode = "any" | "all";
 
 export default function Filters() {
   const router = useRouter();
-  const sp = useSearchParams();
-  const qsKey = sp.toString();
+  const searchParams = useSearchParams();
 
-  // ✅ inicializa estado a partir da URL (fonte de verdade)
-  const [q, setQ] = useState(sp.get("q") || "");
-  const [uf, setUf] = useState(sp.get("uf") || "");
-  const [codigoModalidadeContratacao, setCodigoModalidadeContratacao] = useState(
-    sp.get("codigoModalidadeContratacao") || "8"
+  /*
+   * Os estados são inicializados pela URL apenas
+   * na montagem do componente.
+   *
+   * Não reidratamos os estados a cada alteração da
+   * URL, pois isso gerava ciclo e cancelava o
+   * carregamento do Results.
+   */
+  const [q, setQ] = useState(
+    () => searchParams.get("q") || ""
   );
 
-  // Publicação
-  const [dataIni, setDataIni] = useState(sp.get("dataIni") || "");
-  const [dataFim, setDataFim] = useState(sp.get("dataFim") || "");
-
-  // ✅ Encerramento
-  const [encIni, setEncIni] = useState(sp.get("encIni") || "");
-  const [encFim, setEncFim] = useState(sp.get("encFim") || "");
-
-  const [pageSize, setPageSize] = useState(sp.get("pageSize") || "50");
-
-  const [includeText, setIncludeText] = useState(sp.get("include") || "");
-  const [excludeText, setExcludeText] = useState(sp.get("exclude") || "");
-  const [includeMode, setIncludeMode] = useState<IncludeMode>(
-    (sp.get("includeMode") as IncludeMode) || "any"
+  const [uf, setUf] = useState(
+    () => searchParams.get("uf") || ""
   );
 
-  // ✅ debounces (reduz pancada no backend)
-  const dq = useDebounced(q, 400);
-  const dInclude = useDebounced(includeText, 250);
-  const dExclude = useDebounced(excludeText, 250);
+  const [
+    codigoModalidadeContratacao,
+    setCodigoModalidadeContratacao,
+  ] = useState(
+    () =>
+      searchParams.get(
+        "codigoModalidadeContratacao"
+      ) || "8"
+  );
 
-  // ✅ se URL mudar por navegação/refresh, reidrata campos (governança)
-  useEffect(() => {
-    setQ(sp.get("q") || "");
-    setUf(sp.get("uf") || "");
-    setCodigoModalidadeContratacao(sp.get("codigoModalidadeContratacao") || "8");
+  const [dataIni, setDataIni] =
+    useState(
+      () =>
+        searchParams.get("dataIni") || ""
+    );
 
-    setDataIni(sp.get("dataIni") || "");
-    setDataFim(sp.get("dataFim") || "");
+  const [dataFim, setDataFim] =
+    useState(
+      () =>
+        searchParams.get("dataFim") || ""
+    );
 
-    setEncIni(sp.get("encIni") || "");
-    setEncFim(sp.get("encFim") || "");
+  const [encIni, setEncIni] =
+    useState(
+      () =>
+        searchParams.get("encIni") || ""
+    );
 
-    setPageSize(sp.get("pageSize") || "50");
+  const [encFim, setEncFim] =
+    useState(
+      () =>
+        searchParams.get("encFim") || ""
+    );
 
-    setIncludeText(sp.get("include") || "");
-    setExcludeText(sp.get("exclude") || "");
-    setIncludeMode(((sp.get("includeMode") || "any") as IncludeMode));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [qsKey]);
+  const [pageSize, setPageSize] =
+    useState(
+      () =>
+        searchParams.get("pageSize") ||
+        "50"
+    );
+
+  const [includeText, setIncludeText] =
+    useState(
+      () =>
+        searchParams.get("include") || ""
+    );
+
+  const [excludeText, setExcludeText] =
+    useState(
+      () =>
+        searchParams.get("exclude") || ""
+    );
+
+  const [includeMode, setIncludeMode] =
+    useState<IncludeMode>(() => {
+      const value =
+        searchParams.get("includeMode");
+
+      return value === "all"
+        ? "all"
+        : "any";
+    });
+
+  const debouncedQ = useDebounced(q, 500);
+
+  const debouncedInclude =
+    useDebounced(includeText, 350);
+
+  const debouncedExclude =
+    useDebounced(excludeText, 350);
+
+  /*
+   * Evita disparar router.replace repetidamente
+   * para a mesma URL.
+   */
+  const lastAppliedQueryRef =
+    useRef<string>("");
 
   const queryString = useMemo(() => {
     const next = new URLSearchParams();
 
-    if (dq) next.set("q", dq);
-    if (uf) next.set("uf", uf);
+    const normalizedQ =
+      debouncedQ.trim();
 
-    next.set("codigoModalidadeContratacao", codigoModalidadeContratacao);
+    const normalizedUf = uf
+      .trim()
+      .toUpperCase();
 
-    if (dataIni) next.set("dataIni", dataIni);
-    if (dataFim) next.set("dataFim", dataFim);
+    if (normalizedQ) {
+      next.set("q", normalizedQ);
+    }
 
-    // ✅ Encerramento
-    if (encIni) next.set("encIni", encIni);
-    if (encFim) next.set("encFim", encFim);
+    if (normalizedUf) {
+      next.set("uf", normalizedUf);
+    }
 
-    const ps = Math.max(10, Math.min(50, Number(pageSize || 50)));
-    next.set("pageSize", String(ps));
+    next.set(
+      "codigoModalidadeContratacao",
+      codigoModalidadeContratacao
+    );
+
+    if (dataIni) {
+      next.set("dataIni", dataIni);
+    }
+
+    if (dataFim) {
+      next.set("dataFim", dataFim);
+    }
+
+    if (encIni) {
+      next.set("encIni", encIni);
+    }
+
+    if (encFim) {
+      next.set("encFim", encFim);
+    }
+
+    const parsedPageSize =
+      Number(pageSize || 50);
+
+    const safePageSize = Math.max(
+      10,
+      Math.min(
+        50,
+        Number.isFinite(parsedPageSize)
+          ? parsedPageSize
+          : 50
+      )
+    );
+
+    next.set(
+      "pageSize",
+      String(safePageSize)
+    );
+
+    /*
+     * Sempre volta para a página 1 quando os
+     * filtros são alterados.
+     */
     next.set("page", "1");
 
-    if (dInclude.trim()) next.set("include", dInclude.trim());
-    if (dExclude.trim()) next.set("exclude", dExclude.trim());
+    const normalizedInclude =
+      debouncedInclude.trim();
 
-    next.set("includeMode", includeMode);
+    const normalizedExclude =
+      debouncedExclude.trim();
+
+    if (normalizedInclude) {
+      next.set(
+        "include",
+        normalizedInclude
+      );
+    }
+
+    if (normalizedExclude) {
+      next.set(
+        "exclude",
+        normalizedExclude
+      );
+    }
+
+    next.set(
+      "includeMode",
+      includeMode
+    );
 
     return next.toString();
   }, [
-    dq,
+    debouncedQ,
     uf,
     codigoModalidadeContratacao,
     dataIni,
@@ -109,131 +258,297 @@ export default function Filters() {
     encIni,
     encFim,
     pageSize,
-    dInclude,
-    dExclude,
+    debouncedInclude,
+    debouncedExclude,
     includeMode,
   ]);
 
-  // ✅ Router-native: atualiza URL sem gambiarra de popstate
   useEffect(() => {
-    router.replace(`?${queryString}`, { scroll: false });
-  }, [queryString, router]);
+    const currentQuery =
+      searchParams.toString();
+
+    if (currentQuery === queryString) {
+      lastAppliedQueryRef.current =
+        queryString;
+
+      return;
+    }
+
+    if (
+      lastAppliedQueryRef.current ===
+      queryString
+    ) {
+      return;
+    }
+
+    lastAppliedQueryRef.current =
+      queryString;
+
+    router.replace(`?${queryString}`, {
+      scroll: false,
+    });
+  }, [
+    queryString,
+    router,
+    searchParams,
+  ]);
 
   return (
-    <section style={{ display: "grid", gap: 12 }}>
+    <section
+      style={{
+        display: "grid",
+        gap: 12,
+      }}
+    >
       <div style={grid3}>
         <div style={field}>
-          <label style={label}>Busca (PNCP)</label>
+          <label style={label}>
+            Busca (PNCP)
+          </label>
+
           <input
-            placeholder="Ex: autoclave, bomba infusão, equipamento médico..."
+            placeholder="Ex: autoclave, bomba de infusão, equipamento médico..."
             value={q}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={(event) =>
+              setQ(event.target.value)
+            }
             style={input}
           />
         </div>
 
         <div style={field}>
           <label style={label}>UF</label>
+
           <input
-            placeholder="Ex: MT"
+            placeholder="Ex: RS"
             value={uf}
-            onChange={(e) => setUf(e.target.value.toUpperCase())}
+            onChange={(event) =>
+              setUf(
+                event.target.value
+                  .toUpperCase()
+                  .replace(/[^A-Z]/g, "")
+                  .slice(0, 2)
+              )
+            }
             style={input}
             maxLength={2}
           />
         </div>
 
         <div style={field}>
-          <label style={label}>Modalidade (código)</label>
+          <label style={label}>
+            Modalidade (código)
+          </label>
+
           <select
-            value={codigoModalidadeContratacao}
-            onChange={(e) => setCodigoModalidadeContratacao(e.target.value)}
+            value={
+              codigoModalidadeContratacao
+            }
+            onChange={(event) =>
+              setCodigoModalidadeContratacao(
+                event.target.value
+              )
+            }
             style={input}
           >
-            {MODALIDADES.map((m) => (
-              <option key={m.code} value={m.code}>
-                {m.label}
-              </option>
-            ))}
+            {MODALIDADES.map(
+              (modalidade) => (
+                <option
+                  key={modalidade.code}
+                  value={modalidade.code}
+                >
+                  {modalidade.label}
+                </option>
+              )
+            )}
           </select>
         </div>
       </div>
 
-      {/* Publicação */}
       <div style={grid3}>
         <div style={field}>
-          <label style={label}>Publicado (início)</label>
-          <input type="date" value={dataIni} onChange={(e) => setDataIni(e.target.value)} style={input} />
+          <label style={label}>
+            Publicado (início)
+          </label>
+
+          <input
+            type="date"
+            value={dataIni}
+            onChange={(event) =>
+              setDataIni(
+                event.target.value
+              )
+            }
+            style={input}
+          />
         </div>
 
         <div style={field}>
-          <label style={label}>Publicado (fim)</label>
-          <input type="date" value={dataFim} onChange={(e) => setDataFim(e.target.value)} style={input} />
+          <label style={label}>
+            Publicado (fim)
+          </label>
+
+          <input
+            type="date"
+            value={dataFim}
+            onChange={(event) =>
+              setDataFim(
+                event.target.value
+              )
+            }
+            style={input}
+          />
         </div>
 
         <div style={field}>
-          <label style={label}>Tamanho da página</label>
-          <select value={pageSize} onChange={(e) => setPageSize(e.target.value)} style={input}>
-            <option value="10">10 por página</option>
-            <option value="20">20 por página</option>
-            <option value="50">50 por página</option>
+          <label style={label}>
+            Tamanho da página
+          </label>
+
+          <select
+            value={pageSize}
+            onChange={(event) =>
+              setPageSize(
+                event.target.value
+              )
+            }
+            style={input}
+          >
+            <option value="10">
+              10 por página
+            </option>
+
+            <option value="20">
+              20 por página
+            </option>
+
+            <option value="50">
+              50 por página
+            </option>
           </select>
         </div>
       </div>
 
-      {/* ✅ Encerramento */}
       <div style={grid3}>
         <div style={field}>
-          <label style={label}>Encerramento (início)</label>
-          <input type="date" value={encIni} onChange={(e) => setEncIni(e.target.value)} style={input} />
+          <label style={label}>
+            Encerramento (início)
+          </label>
+
+          <input
+            type="date"
+            value={encIni}
+            onChange={(event) =>
+              setEncIni(
+                event.target.value
+              )
+            }
+            style={input}
+          />
         </div>
 
         <div style={field}>
-          <label style={label}>Encerramento (fim)</label>
-          <input type="date" value={encFim} onChange={(e) => setEncFim(e.target.value)} style={input} />
+          <label style={label}>
+            Encerramento (fim)
+          </label>
+
+          <input
+            type="date"
+            value={encFim}
+            onChange={(event) =>
+              setEncFim(
+                event.target.value
+              )
+            }
+            style={input}
+          />
         </div>
 
         <div style={field}>
-          <label style={label}> </label>
-          <div style={{ ...hint, marginTop: 2 }}>
-            Dica: use Encerramento para focar em “oportunidades quentes”.
+          <label style={label}>
+            Período estratégico
+          </label>
+
+          <div style={hintBox}>
+            Use o encerramento para focar
+            nas oportunidades mais próximas.
           </div>
         </div>
       </div>
 
       <div style={grid3}>
         <div style={field}>
-          <label style={label}>Incluir (palavras-chave)</label>
+          <label style={label}>
+            Incluir (palavras-chave)
+          </label>
+
           <input
             placeholder="Ex: médico, hospitalar, autoclave"
             value={includeText}
-            onChange={(e) => setIncludeText(e.target.value)}
+            onChange={(event) =>
+              setIncludeText(
+                event.target.value
+              )
+            }
             style={input}
           />
         </div>
 
         <div style={field}>
-          <label style={label}>Modo do Incluir</label>
-          <select value={includeMode} onChange={(e) => setIncludeMode(e.target.value as IncludeMode)} style={input}>
-            <option value="any">QUALQUER (OR) — recomendado</option>
-            <option value="all">TODOS (AND) — mais restrito</option>
+          <label style={label}>
+            Modo do incluir
+          </label>
+
+          <select
+            value={includeMode}
+            onChange={(event) =>
+              setIncludeMode(
+                event.target
+                  .value as IncludeMode
+              )
+            }
+            style={input}
+          >
+            <option value="any">
+              QUALQUER (OR) — recomendado
+            </option>
+
+            <option value="all">
+              TODOS (AND) — mais restrito
+            </option>
           </select>
         </div>
 
         <div style={field}>
-          <label style={label}>Excluir</label>
+          <label style={label}>
+            Excluir
+          </label>
+
           <input
             placeholder="Ex: obra, pavimentação, drenagem, asfalto"
             value={excludeText}
-            onChange={(e) => setExcludeText(e.target.value)}
+            onChange={(event) =>
+              setExcludeText(
+                event.target.value
+              )
+            }
             style={input}
           />
         </div>
       </div>
 
       <div style={hint}>
-        Se “Incluir” estiver muito restrito, use <b style={{ color: "#EDEDED" }}>QUALQUER (OR)</b>. Assim aparece tudo
-        que contém pelo menos 1 termo.
+        Se o campo “Incluir” estiver
+        muito restritivo, utilize{" "}
+        <strong
+          style={{
+            color: "#EDEDED",
+          }}
+        >
+          QUALQUER (OR)
+        </strong>
+        . O sistema mostrará resultados
+        contendo pelo menos um dos termos.
       </div>
     </section>
   );
@@ -241,20 +556,45 @@ export default function Filters() {
 
 const grid3: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "2fr 1fr 1fr",
+  gridTemplateColumns:
+    "minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr)",
   gap: 12,
 };
 
-const field: React.CSSProperties = { display: "grid", gap: 6 };
-const label: React.CSSProperties = { fontSize: 12, color: "#A1A1AA" };
+const field: React.CSSProperties = {
+  display: "grid",
+  gap: 6,
+  minWidth: 0,
+};
+
+const label: React.CSSProperties = {
+  fontSize: 12,
+  color: "#A1A1AA",
+};
 
 const input: React.CSSProperties = {
+  width: "100%",
+  minWidth: 0,
+  boxSizing: "border-box",
   padding: "11px 12px",
-  border: "1px solid rgba(255,255,255,0.12)",
+  border:
+    "1px solid rgba(255,255,255,0.12)",
   borderRadius: 12,
   background: "rgba(0,0,0,0.35)",
   color: "#EDEDED",
   outline: "none",
 };
 
-const hint: React.CSSProperties = { fontSize: 12, color: "#A1A1AA" };
+const hint: React.CSSProperties = {
+  fontSize: 12,
+  color: "#A1A1AA",
+};
+
+const hintBox: React.CSSProperties = {
+  minHeight: 43,
+  display: "flex",
+  alignItems: "center",
+  fontSize: 12,
+  lineHeight: 1.4,
+  color: "#A1A1AA",
+};
