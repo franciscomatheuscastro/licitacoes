@@ -435,10 +435,22 @@ async function executeSearch(
   const rawResult =
     await executeWithRetry(
       async () => {
-        return withTimeout(
-          searchPncp(params),
-          PNCP_TIMEOUT_MS
-        );
+        const controller =
+          new AbortController();
+
+        const timeout =
+          setTimeout(() => {
+            controller.abort();
+          }, PNCP_TIMEOUT_MS);
+
+        try {
+          return await searchPncp(
+            params,
+            controller.signal
+          );
+        } finally {
+          clearTimeout(timeout);
+        }
       }
     );
 
