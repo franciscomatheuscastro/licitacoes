@@ -1,222 +1,732 @@
 import { NextResponse } from "next/server";
+
 import { searchPncp } from "@/lib/pncp";
-import type { SearchParams } from "@/lib/types";
+import type {
+  Licitacao,
+  SearchParams,
+} from "@/lib/types";
 
-type CacheEntry = { ts: number; data: any };
-const g = globalThis as any;
+/*
+ * Configuração da rota para produção.
+ */
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-g.__PNCP_CACHE__ ??= new Map<string, CacheEntry>();
-g.__PNCP_INFLIGHT__ ??= new Map<string, Promise<any>>();
-g.__PNCP_SEM__ ??= { cur: 0, max: 1 }; // ✅ concorrência baixa para não “estressar” o PNCP
+/*
+ * A Vercel pode aplicar limites diferentes conforme
+ * o plano. Esta configuração informa o limite desejado.
+ */
+export const maxDuration = 60;
 
-const CACHE: Map<string, CacheEntry> = g.__PNCP_CACHE__;
-const INFLIGHT: Map<string, Promise<any>> = g.__PNCP_INFLIGHT__;
-const SEM: { cur: number; max: number } = g.__PNCP_SEM__;
+type SearchPayload = {
+  page: number;
+  pageSize: number;
+  rawCount: number;
+  morePossible: boolean;
+  total: number;
+  items: Licitacao[];
+};
 
-// ✅ cache curto por página (ajuda muito em re-tentativas e re-render)
+type CacheEntry = {
+  timestamp: number;
+  data: SearchPayload;
+};
+
+type GlobalPncpStore = typeof globalThis & {
+  __PNCP_CACHE__?: Map<
+    string,
+    CacheEntry
+  >;
+
+  __PNCP_INFLIGHT__?: Map<
+    string,
+    Promise<SearchPayload>
+  >;
+};
+
+const globalStore =
+  globalThis as GlobalPncpStore;
+
+globalStore.__PNCP_CACHE__ ??=
+  new Map();
+
+globalStore.__PNCP_INFLIGHT__ ??=
+  new Map();
+
+const CACHE =
+  globalStore.__PNCP_CACHE__;
+
+const INFLIGHT =
+  globalStore.__PNCP_INFLIGHT__;
+
+/*
+ * Cache curto para reduzir consultas repetidas ao PNCP.
+ *
+ * Observação: em ambiente serverless, este cache é
+ * oportunístico. Ele pode ser perdido quando a instância
+ * da função for encerrada.
+ */
 const CACHE_TTL_MS = 60_000;
 
-// ✅ retry server-side (para erros típicos do PNCP)
-const MAX_RETRIES = 5; // total até 6 tentativas
-const BASE_BACKOFF_MS = 450;
+/*
+ * Em produção, não devemos fazer seis tentativas longas.
+ *
+ * Total:
+ * - primeira tentativa;
+ * - mais uma tentativa em caso de instabilidade.
+ */
+const MAX_ATTEMPTS = 2;
 
-// ✅ timeout por página (PNCP às vezes passa de 12s)
-const PNCP_TIMEOUT_MS = 45_000;
+/*
+ * Cada tentativa pode aguardar até 12 segundos.
+ *
+ * Com duas tentativas e backoff, a execução fica
+ * dentro de uma janela mais compatível com a Vercel.
+ */
+const PNCP_TIMEOUT_MS = 12_000;
+const BASE_BACKOFF_MS = 700;
 
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
+function sleep(milliseconds: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(
+      resolve,
+      milliseconds
+    );
+  });
 }
 
-function keyFromParams(p: SearchParams) {
-  const sp = new URLSearchParams();
-  if (p.q) sp.set("q", p.q);
-  if (p.uf) sp.set("uf", p.uf);
-  if (p.codigoModalidadeContratacao) sp.set("codigoModalidadeContratacao", p.codigoModalidadeContratacao);
-  if (p.dataIni) sp.set("dataIni", p.dataIni);
-  if (p.dataFim) sp.set("dataFim", p.dataFim);
+function createCacheKey(
+  params: SearchParams
+) {
+  const searchParams =
+    new URLSearchParams();
 
-  // ✅ Encerramento
-  if (p.encIni) sp.set("encIni", p.encIni);
-  if (p.encFim) sp.set("encFim", p.encFim);
+  if (params.q) {
+    searchParams.set(
+      "q",
+      params.q
+    );
+  }
 
-  sp.set("page", String(p.page ?? "1"));
-  sp.set("pageSize", String(p.pageSize ?? "50"));
-  return sp.toString();
+  if (params.uf) {
+    searchParams.set(
+      "uf",
+      params.uf
+    );
+  }
+
+  if (
+    params.codigoModalidadeContratacao
+  ) {
+    searchParams.set(
+      "codigoModalidadeContratacao",
+      params.codigoModalidadeContratacao
+    );
+  }
+
+  if (params.dataIni) {
+    searchParams.set(
+      "dataIni",
+      params.dataIni
+    );
+  }
+
+  if (params.dataFim) {
+    searchParams.set(
+      "dataFim",
+      params.dataFim
+    );
+  }
+
+  if (params.encIni) {
+    searchParams.set(
+      "encIni",
+      params.encIni
+    );
+  }
+
+  if (params.encFim) {
+    searchParams.set(
+      "encFim",
+      params.encFim
+    );
+  }
+
+  searchParams.set(
+    "page",
+    String(params.page ?? "1")
+  );
+
+  searchParams.set(
+    "pageSize",
+    String(params.pageSize ?? "50")
+  );
+
+  return searchParams.toString();
 }
 
-function looksLikePncpUnstable(msg: string) {
-  const t = (msg || "").toLowerCase();
-  return (
-    t.includes("jdbc") ||
-    t.includes("failed to obtain") ||
-    t.includes("internal server error") ||
-    t.includes("pncp erro 500") ||
-    t.includes("erro na comunicação com o banco") ||
-    t.includes("timeout") ||
-    t.includes("network") ||
-    t.includes("fetch failed")
+function getErrorMessage(
+  error: unknown
+) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(
+    error || "Erro inesperado"
   );
 }
 
-async function withConcurrency<T>(fn: () => Promise<T>) {
-  while (SEM.cur >= SEM.max) await sleep(50);
-  SEM.cur++;
-  try {
-    return await fn();
-  } finally {
-    SEM.cur--;
-  }
+function isPncpUnstable(
+  message: string
+) {
+  const normalized =
+    message.toLowerCase();
+
+  return (
+    normalized.includes("jdbc") ||
+    normalized.includes(
+      "failed to obtain"
+    ) ||
+    normalized.includes(
+      "internal server error"
+    ) ||
+    normalized.includes(
+      "pncp erro 500"
+    ) ||
+    normalized.includes(
+      "erro na comunicação com o banco"
+    ) ||
+    normalized.includes(
+      "timeout"
+    ) ||
+    normalized.includes(
+      "network"
+    ) ||
+    normalized.includes(
+      "fetch failed"
+    ) ||
+    normalized.includes(
+      "econnreset"
+    ) ||
+    normalized.includes(
+      "etimedout"
+    ) ||
+    normalized.includes(
+      "socket hang up"
+    )
+  );
 }
 
-async function withTimeout<T>(p: Promise<T>, ms: number) {
-  let t: any;
-  const timeout = new Promise<never>((_, rej) => {
-    t = setTimeout(() => rej(new Error(`Timeout PNCP após ${ms}ms`)), ms);
-  });
-  try {
-    return await Promise.race([p, timeout]);
-  } finally {
-    clearTimeout(t);
-  }
+function withTimeout<T>(
+  promise: Promise<T>,
+  milliseconds: number
+): Promise<T> {
+  return new Promise<T>(
+    (resolve, reject) => {
+      const timeout =
+        setTimeout(() => {
+          reject(
+            new Error(
+              `Timeout PNCP após ${milliseconds}ms`
+            )
+          );
+        }, milliseconds);
+
+      promise
+        .then((result) => {
+          clearTimeout(timeout);
+          resolve(result);
+        })
+        .catch((error) => {
+          clearTimeout(timeout);
+          reject(error);
+        });
+    }
+  );
 }
 
-async function withRetry<T>(fn: () => Promise<T>) {
-  let lastErr: any = null;
+async function executeWithRetry<T>(
+  operation: () => Promise<T>
+): Promise<T> {
+  let lastError: unknown = null;
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+  for (
+    let attempt = 1;
+    attempt <= MAX_ATTEMPTS;
+    attempt++
+  ) {
     try {
-      return await fn();
-    } catch (e: any) {
-      lastErr = e;
-      const msg = e?.message ?? String(e);
+      return await operation();
+    } catch (error) {
+      lastError = error;
 
-      const retryable = looksLikePncpUnstable(msg);
-      if (!retryable || attempt === MAX_RETRIES) throw e;
+      const message =
+        getErrorMessage(error);
 
-      const backoff = BASE_BACKOFF_MS * Math.pow(2, attempt);
-      const jitter = Math.floor(Math.random() * 180);
-      await sleep(backoff + jitter);
+      const retryable =
+        isPncpUnstable(message);
+
+      const isLastAttempt =
+        attempt >= MAX_ATTEMPTS;
+
+      if (
+        !retryable ||
+        isLastAttempt
+      ) {
+        throw error;
+      }
+
+      const backoff =
+        BASE_BACKOFF_MS *
+        Math.pow(
+          2,
+          attempt - 1
+        );
+
+      const jitter =
+        Math.floor(
+          Math.random() * 250
+        );
+
+      await sleep(
+        backoff + jitter
+      );
     }
   }
 
-  throw lastErr;
+  throw (
+    lastError ??
+    new Error(
+      "Falha ao consultar o PNCP."
+    )
+  );
 }
 
-function dateOnlyMs(iso?: string) {
-  if (!iso) return null;
-  const d = iso.slice(0, 10); // aceita "YYYY-MM-DD" ou "YYYY-MM-DDTHH..."
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
-  return new Date(d + "T00:00:00.000Z").getTime();
+function parsePositiveInteger(
+  value: string | null,
+  fallback: number
+) {
+  const parsed = Number(value);
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < 1
+  ) {
+    return fallback;
+  }
+
+  return Math.floor(parsed);
 }
 
-function inRange(dateIso: string | undefined, ini?: string, fim?: string) {
-  const v = dateOnlyMs(dateIso);
-  if (v == null) return false;
+function dateOnlyTimestamp(
+  value?: string
+) {
+  if (!value) {
+    return null;
+  }
 
-  const a = ini ? dateOnlyMs(ini) : null;
-  const b = fim ? dateOnlyMs(fim) : null;
+  const datePart =
+    value.slice(0, 10);
 
-  if (a != null && v < a) return false;
-  if (b != null && v > b) return false;
+  if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(
+      datePart
+    )
+  ) {
+    return null;
+  }
+
+  const timestamp =
+    new Date(
+      `${datePart}T00:00:00.000Z`
+    ).getTime();
+
+  return Number.isNaN(timestamp)
+    ? null
+    : timestamp;
+}
+
+function isDateInsideRange(
+  value: string | undefined,
+  initialDate?: string,
+  finalDate?: string
+) {
+  const current =
+    dateOnlyTimestamp(value);
+
+  if (current === null) {
+    return false;
+  }
+
+  const initial =
+    initialDate
+      ? dateOnlyTimestamp(
+          initialDate
+        )
+      : null;
+
+  const final =
+    finalDate
+      ? dateOnlyTimestamp(
+          finalDate
+        )
+      : null;
+
+  if (
+    initial !== null &&
+    current < initial
+  ) {
+    return false;
+  }
+
+  if (
+    final !== null &&
+    current > final
+  ) {
+    return false;
+  }
+
   return true;
 }
 
-export async function GET(req: Request) {
-  try {
-    const { searchParams } = new URL(req.url);
-
-    const params: SearchParams = {
-      q: searchParams.get("q") ?? undefined,
-      uf: searchParams.get("uf") ?? undefined,
-      codigoModalidadeContratacao: searchParams.get("codigoModalidadeContratacao") ?? undefined,
-      dataIni: searchParams.get("dataIni") ?? undefined,
-      dataFim: searchParams.get("dataFim") ?? undefined,
-
-      // ✅ Encerramento
-      encIni: searchParams.get("encIni") ?? undefined,
-      encFim: searchParams.get("encFim") ?? undefined,
-
-      page: searchParams.get("page") ?? "1",
-      pageSize: searchParams.get("pageSize") ?? "50",
-    };
-
-    // sanitiza
-    const page = Math.max(1, Number(params.page || 1));
-    const pageSize = Math.max(10, Math.min(50, Number(params.pageSize || 50)));
-    params.page = String(page);
-    params.pageSize = String(pageSize);
-
-    const cacheKey = keyFromParams(params);
-
-    // ✅ cache
-    const cached = CACHE.get(cacheKey);
-    if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
-      return NextResponse.json({ ok: true, ...cached.data, cached: true });
-    }
-
-    // ✅ inflight dedupe
-    if (INFLIGHT.has(cacheKey)) {
-      const data = await INFLIGHT.get(cacheKey)!;
-      return NextResponse.json({ ok: true, ...data, cached: true, inflight: true });
-    }
-
-    const prom = withConcurrency(async () => {
-      return await withRetry(async () => {
-        const itemsRaw = await withTimeout(searchPncp(params), PNCP_TIMEOUT_MS);
-
-        // ✅ bruto do PNCP (antes do filtro)
-        const rawCount = Array.isArray(itemsRaw) ? itemsRaw.length : 0;
-
-        // ✅ “tem mais” deve ser calculado pelo bruto
-        const morePossible = rawCount >= pageSize;
-
-        // ✅ filtro de encerramento (server-side)
-        let items = itemsRaw;
-        if (params.encIni || params.encFim) {
-          items = itemsRaw.filter((it: any) => inRange(it.prazoEncerramento, params.encIni, params.encFim));
-        }
-
-        const payload = {
-          page,
-          pageSize,
-
-          // ✅ novos campos (pra governança do front)
-          rawCount,
-          morePossible,
-
-          // total agora é do conjunto filtrado (faz sentido pro usuário)
-          total: items.length,
-          items,
-        };
-
-        CACHE.set(cacheKey, { ts: Date.now(), data: payload });
-        return payload;
-      });
-    });
-
-    INFLIGHT.set(cacheKey, prom);
-
-    try {
-      const payload = await prom;
-      return NextResponse.json({ ok: true, ...payload });
-    } finally {
-      INFLIGHT.delete(cacheKey);
-    }
-  } catch (e: any) {
-    const msg = e?.message ?? "Erro inesperado";
-    const pncpUnstable = looksLikePncpUnstable(msg);
-
-    const res = NextResponse.json(
+function createNoStoreResponse(
+  body: Record<string, unknown>,
+  status = 200
+) {
+  const response =
+    NextResponse.json(
+      body,
       {
-        ok: false,
-        error: pncpUnstable
-          ? `PNCP instável/lento no momento. O sistema vai tentar novamente. Detalhe: ${msg}`
-          : msg,
-      },
-      { status: pncpUnstable ? 503 : 500 }
+        status,
+      }
     );
 
-    if (pncpUnstable) res.headers.set("Retry-After", "2");
-    return res;
+  response.headers.set(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate"
+  );
+
+  return response;
+}
+
+function removeExpiredCacheEntries() {
+  const now = Date.now();
+
+  for (
+    const [key, entry]
+    of CACHE.entries()
+  ) {
+    if (
+      now - entry.timestamp >
+      CACHE_TTL_MS
+    ) {
+      CACHE.delete(key);
+    }
+  }
+}
+
+async function executeSearch(
+  params: SearchParams,
+  page: number,
+  pageSize: number
+): Promise<SearchPayload> {
+  const rawResult =
+    await executeWithRetry(
+      async () => {
+        return withTimeout(
+          searchPncp(params),
+          PNCP_TIMEOUT_MS
+        );
+      }
+    );
+
+  const rawItems: Licitacao[] =
+    Array.isArray(rawResult)
+      ? rawResult
+      : [];
+
+  /*
+   * morePossible precisa ser calculado antes
+   * do filtro local de encerramento.
+   *
+   * Mesmo que nenhuma licitação da página atual
+   * tenha a data de encerramento solicitada,
+   * outras páginas ainda podem conter resultados.
+   */
+  const rawCount =
+    rawItems.length;
+
+  const morePossible =
+    rawCount >= pageSize;
+
+  let filteredItems =
+    rawItems;
+
+  if (
+    params.encIni ||
+    params.encFim
+  ) {
+    filteredItems =
+      rawItems.filter(
+        (item) =>
+          isDateInsideRange(
+            item.prazoEncerramento,
+            params.encIni,
+            params.encFim
+          )
+      );
+  }
+
+  return {
+    page,
+    pageSize,
+    rawCount,
+    morePossible,
+    total:
+      filteredItems.length,
+    items: filteredItems,
+  };
+}
+
+export async function GET(
+  request: Request
+) {
+  try {
+    const url =
+      new URL(request.url);
+
+    const input =
+      url.searchParams;
+
+    const page =
+      parsePositiveInteger(
+        input.get("page"),
+        1
+      );
+
+    const requestedPageSize =
+      parsePositiveInteger(
+        input.get("pageSize"),
+        50
+      );
+
+    const pageSize =
+      Math.max(
+        10,
+        Math.min(
+          50,
+          requestedPageSize
+        )
+      );
+
+    const uf =
+      input
+        .get("uf")
+        ?.trim()
+        .toUpperCase();
+
+    const params: SearchParams = {
+      q:
+        input
+          .get("q")
+          ?.trim() ||
+        undefined,
+
+      uf:
+        uf || undefined,
+
+      codigoModalidadeContratacao:
+        input
+          .get(
+            "codigoModalidadeContratacao"
+          )
+          ?.trim() ||
+        undefined,
+
+      dataIni:
+        input
+          .get("dataIni")
+          ?.trim() ||
+        undefined,
+
+      dataFim:
+        input
+          .get("dataFim")
+          ?.trim() ||
+        undefined,
+
+      encIni:
+        input
+          .get("encIni")
+          ?.trim() ||
+        undefined,
+
+      encFim:
+        input
+          .get("encFim")
+          ?.trim() ||
+        undefined,
+
+      page: String(page),
+      pageSize:
+        String(pageSize),
+    };
+
+    if (
+      params.dataIni &&
+      params.dataFim &&
+      params.dataIni >
+        params.dataFim
+    ) {
+      return createNoStoreResponse(
+        {
+          ok: false,
+          error:
+            "A data inicial de publicação não pode ser posterior à data final.",
+        },
+        400
+      );
+    }
+
+    if (
+      params.encIni &&
+      params.encFim &&
+      params.encIni >
+        params.encFim
+    ) {
+      return createNoStoreResponse(
+        {
+          ok: false,
+          error:
+            "A data inicial de encerramento não pode ser posterior à data final.",
+        },
+        400
+      );
+    }
+
+    removeExpiredCacheEntries();
+
+    const cacheKey =
+      createCacheKey(params);
+
+    const cached =
+      CACHE.get(cacheKey);
+
+    if (
+      cached &&
+      Date.now() -
+        cached.timestamp <
+        CACHE_TTL_MS
+    ) {
+      return createNoStoreResponse({
+        ok: true,
+        ...cached.data,
+        cached: true,
+      });
+    }
+
+    /*
+     * Se a mesma página já estiver sendo buscada,
+     * reutiliza a Promise.
+     */
+    const existingRequest =
+      INFLIGHT.get(cacheKey);
+
+    if (existingRequest) {
+      const data =
+        await existingRequest;
+
+      return createNoStoreResponse({
+        ok: true,
+        ...data,
+        cached: false,
+        inflight: true,
+      });
+    }
+
+    const searchPromise =
+      executeSearch(
+        params,
+        page,
+        pageSize
+      );
+
+    INFLIGHT.set(
+      cacheKey,
+      searchPromise
+    );
+
+    try {
+      const payload =
+        await searchPromise;
+
+      CACHE.set(cacheKey, {
+        timestamp: Date.now(),
+        data: payload,
+      });
+
+      return createNoStoreResponse({
+        ok: true,
+        ...payload,
+        cached: false,
+      });
+    } finally {
+      /*
+       * Só remove se a Promise armazenada ainda for
+       * exatamente esta requisição.
+       */
+      if (
+        INFLIGHT.get(
+          cacheKey
+        ) === searchPromise
+      ) {
+        INFLIGHT.delete(
+          cacheKey
+        );
+      }
+    }
+  } catch (error) {
+    const message =
+      getErrorMessage(error);
+
+    const pncpUnstable =
+      isPncpUnstable(message);
+
+    console.error(
+      "[API LICITAÇÕES]",
+      {
+        message,
+        pncpUnstable,
+        timestamp:
+          new Date().toISOString(),
+      }
+    );
+
+    const status =
+      pncpUnstable
+        ? 503
+        : 500;
+
+    const response =
+      createNoStoreResponse(
+        {
+          ok: false,
+          error: pncpUnstable
+            ? `O PNCP está instável ou demorou para responder. Tente novamente em alguns segundos. Detalhe técnico: ${message}`
+            : message,
+        },
+        status
+      );
+
+    if (pncpUnstable) {
+      response.headers.set(
+        "Retry-After",
+        "3"
+      );
+    }
+
+    return response;
   }
 }
