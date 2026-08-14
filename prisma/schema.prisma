@@ -56,3 +56,25 @@ enum StatusLicitacao {
   GANHA
   PERDIDA
 }
+
+
+model ExecucaoBusca {
+  id String @id @default(cuid())
+
+  iniciadaEm   DateTime @default(now())
+  finalizadaEm DateTime?
+
+  sucesso Boolean @default(false)
+
+  paginasProcessadas Int @default(0)
+  encontradas        Int @default(0)
+  salvas             Int @default(0)
+  erros              Int @default(0)
+
+  mensagemErro String?
+
+  criadaEm DateTime @default(now())
+
+  @@index([iniciadaEm])
+  @@index([sucesso])
+}

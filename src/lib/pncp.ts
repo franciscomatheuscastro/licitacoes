@@ -1,683 +1,1162 @@
+// src/lib/pncp.ts
+
 import type {
   Licitacao,
   SearchParams,
-} from "./types";
+} from "@/lib/types";
 
-const baseUrl =
-  process.env.PNCP_BASE_URL;
+const PNCP_URL =
+  "https://pncp.gov.br/api/consulta/v1/contratacoes/proposta";
 
-const PNCP_TIMEOUT_MS = 10_000;
+const TAMANHO_PAGINA = 50;
 
 /*
- * O retry ficará centralizado na rota da API.
- * Aqui realizamos somente uma tentativa por chamada.
+ * Como a pesquisa agora é feita manualmente por uma rota HTTP,
+ * não podemos deixar uma execução percorrer centenas de páginas.
+ *
+ * 20 páginas x 50 registros = até 1.000 registros brutos.
+ *
+ * Depois podemos evoluir isso para processamento em background,
+ * caso realmente seja necessário pesquisar volumes maiores.
  */
-const PNCP_MAX_ATTEMPTS = 1;
+const LIMITE_PAGINAS = 200;
 
-// ======================================================
-// Datas
-// ======================================================
+/*
+ * Seu fluxo n8n aguardava entre uma página e outra.
+ * Mantemos a mesma estratégia para evitar HTTP 429.
+ */
+const INTERVALO_ENTRE_PAGINAS_MS = 2000;
 
-function hojeISO() {
-  return new Date()
-    .toISOString()
-    .slice(0, 10);
+/*
+ * Tentativas apenas para falhas temporárias.
+ */
+const MAX_TENTATIVAS = 3;
+
+/*
+ * Timeout individual de cada chamada ao PNCP.
+ */
+const TIMEOUT_PNCP_MS = 30000;
+
+export interface LicitacaoPNCP {
+  numeroControlePNCP?: string;
+
+  objetoCompra?: string;
+  informacaoComplementar?: string;
+
+  valorTotalEstimado?: number;
+
+  dataPublicacaoPncp?: string;
+  dataInclusao?: string;
+
+  dataEncerramentoProposta?: string;
+
+  situacaoCompraNome?: string;
+
+  modalidadeNome?: string;
+  modalidadeId?: number;
+
+  linkSistemaOrigem?: string;
+  linkProcessoEletronico?: string;
+
+  anoCompra?: number;
+  sequencialCompra?: number;
+
+  orgaoEntidade?: {
+    cnpj?: string;
+    razaoSocial?: string;
+  };
+
+  unidadeOrgao?: {
+    nomeUnidade?: string;
+    municipioNome?: string;
+    ufSigla?: string;
+  };
 }
 
-function diasAtrasISO(days: number) {
-  const date = new Date();
+interface RespostaPNCP {
+  data?: LicitacaoPNCP[];
 
-  date.setUTCDate(
-    date.getUTCDate() - days
+  totalPaginas?: number;
+  totalDePaginas?: number;
+  totalPages?: number;
+}
+
+/*
+ * =====================================================
+ * PESQUISA MANUAL DO RADAR
+ * =====================================================
+ */
+
+export interface FiltrosPesquisaRadar {
+  termo?: string;
+
+  uf?: string;
+
+  codigoModalidadeContratacao?: string;
+
+  encerramentoInicio?: string;
+  encerramentoFim?: string;
+}
+
+export interface ResultadoPesquisaRadar {
+  itens: LicitacaoPNCP[];
+
+  paginasProcessadas: number;
+
+  quantidadeRecebida: number;
+}
+
+/*
+ * =====================================================
+ * UTILITÁRIOS
+ * =====================================================
+ */
+
+function aguardar(
+  milissegundos: number
+) {
+  return new Promise<void>(
+    (resolve) => {
+      setTimeout(
+        resolve,
+        milissegundos
+      );
+    }
   );
-
-  return date
-    .toISOString()
-    .slice(0, 10);
 }
 
-function toYYYYMMDD(
-  input: string
+export function normalizarTexto(
+  texto: unknown
 ) {
-  return input.replaceAll("-", "");
-}
-
-function safePageSize(
-  pageSize?: string
-) {
-  const parsed =
-    Number(pageSize ?? 20);
-
-  const valid =
-    Number.isFinite(parsed)
-      ? Math.floor(parsed)
-      : 20;
-
-  return Math.max(
-    10,
-    Math.min(50, valid)
-  );
-}
-
-function safePage(
-  page?: string
-) {
-  const parsed =
-    Number(page ?? 1);
-
-  const valid =
-    Number.isFinite(parsed)
-      ? Math.floor(parsed)
-      : 1;
-
-  return Math.max(1, valid);
-}
-
-// ======================================================
-// Janelas de datas
-// PNCP aceita período máximo de 365 dias
-// ======================================================
-
-function parseYYYYMMDD(
-  value: string
-) {
-  const year =
-    Number(value.slice(0, 4));
-
-  const month =
-    Number(value.slice(4, 6)) - 1;
-
-  const day =
-    Number(value.slice(6, 8));
-
-  return new Date(
-    Date.UTC(
-      year,
-      month,
-      day
+  return String(texto ?? "")
+    .normalize("NFD")
+    .replace(
+      /[\u0300-\u036f]/g,
+      ""
     )
-  );
+    .toLowerCase()
+    .trim();
 }
 
-function formatYYYYMMDD(
-  date: Date
-) {
-  const year =
-    date.getUTCFullYear();
+function dataHojeBrasil() {
+  const partes =
+    new Intl.DateTimeFormat(
+      "en-CA",
+      {
+        timeZone:
+          "America/Sao_Paulo",
 
-  const month =
-    String(
-      date.getUTCMonth() + 1
-    ).padStart(2, "0");
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }
+    ).formatToParts(
+      new Date()
+    );
 
-  const day =
-    String(
-      date.getUTCDate()
-    ).padStart(2, "0");
+  const valores:
+    Record<string, string> =
+    {};
 
-  return `${year}${month}${day}`;
-}
-
-function addDays(
-  date: Date,
-  days: number
-) {
-  const result =
-    new Date(date.getTime());
-
-  result.setUTCDate(
-    result.getUTCDate() + days
-  );
-
-  return result;
-}
-
-function splitIntoWindows(
-  start: string,
-  end: string
-) {
-  const windows: Array<{
-    ini: string;
-    fim: string;
-  }> = [];
-
-  let current =
-    parseYYYYMMDD(start);
-
-  const finalDate =
-    parseYYYYMMDD(end);
-
-  while (
-    current.getTime() <=
-    finalDate.getTime()
+  for (
+    const parte of partes
   ) {
-    const maximumEnd =
-      addDays(current, 364);
-
-    const windowEnd =
-      maximumEnd.getTime() <=
-      finalDate.getTime()
-        ? maximumEnd
-        : finalDate;
-
-    windows.push({
-      ini:
-        formatYYYYMMDD(current),
-
-      fim:
-        formatYYYYMMDD(windowEnd),
-    });
-
-    current =
-      addDays(windowEnd, 1);
+    if (
+      parte.type !== "literal"
+    ) {
+      valores[
+        parte.type
+      ] = parte.value;
+    }
   }
 
-  return windows;
+  return `${valores.year}-${valores.month}-${valores.day}`;
 }
 
-// ======================================================
-// Mapeamento
-// ======================================================
+function formatarDataPNCP(
+  valor: string
+) {
+  return valor.replaceAll(
+    "-",
+    ""
+  );
+}
 
-function mapPncpToLicitacao(
-  item: any
-): Licitacao {
-  const id =
-    String(
-      item?.numeroControlePNCP ??
-        ""
-    ) ||
-    [
-      item?.orgaoEntidade?.cnpj ??
-        "semcnpj",
+/*
+ * Próximo dia útil.
+ *
+ * Mantém a mesma lógica utilizada
+ * anteriormente no fluxo n8n.
+ */
+export function calcularProximoDiaUtil() {
+  const hojeTexto =
+    dataHojeBrasil();
 
-      item?.anoCompra ?? "0",
+  const [
+    ano,
+    mes,
+    dia,
+  ] = hojeTexto
+    .split("-")
+    .map(Number);
 
-      item?.sequencialCompra ??
-        "0",
-    ].join("_");
-
-  const estimatedValue =
-    Number(
-      item?.valorTotalEstimado ??
-        0
+  const data =
+    new Date(
+      Date.UTC(
+        ano,
+        mes - 1,
+        dia,
+        12
+      )
     );
+
+  const diaSemana =
+    data.getUTCDay();
+
+  let adicionar = 1;
+
+  /*
+   * Sexta -> segunda.
+   */
+  if (diaSemana === 5) {
+    adicionar = 3;
+  }
+
+  /*
+   * Sábado -> segunda.
+   */
+  if (diaSemana === 6) {
+    adicionar = 2;
+  }
+
+  /*
+   * Domingo -> segunda.
+   */
+  if (diaSemana === 0) {
+    adicionar = 1;
+  }
+
+  data.setUTCDate(
+    data.getUTCDate() +
+      adicionar
+  );
+
+  const anoFinal =
+    data.getUTCFullYear();
+
+  const mesFinal =
+    String(
+      data.getUTCMonth() + 1
+    ).padStart(
+      2,
+      "0"
+    );
+
+  const diaFinal =
+    String(
+      data.getUTCDate()
+    ).padStart(
+      2,
+      "0"
+    );
+
+  return `${anoFinal}-${mesFinal}-${diaFinal}`;
+}
+
+export function criarIdentificadorPNCP(
+  item: LicitacaoPNCP
+) {
+  if (
+    item.numeroControlePNCP
+  ) {
+    return item
+      .numeroControlePNCP;
+  }
+
+  const cnpj =
+    item.orgaoEntidade
+      ?.cnpj;
+
+  const ano =
+    item.anoCompra;
+
+  const sequencial =
+    item.sequencialCompra;
+
+  if (
+    !cnpj ||
+    !ano ||
+    !sequencial
+  ) {
+    return null;
+  }
+
+  return `${cnpj}_${ano}_${sequencial}`;
+}
+
+function converterParaLicitacao(
+  item: LicitacaoPNCP
+): Licitacao | null {
+  const id =
+    criarIdentificadorPNCP(
+      item
+    );
+
+  if (!id) {
+    return null;
+  }
 
   return {
     id,
 
-    titulo: String(
-      item?.objetoCompra ??
-        item?.objeto ??
-        item?.titulo ??
-        "Sem título"
-    ),
+    titulo:
+      item.objetoCompra?.trim() ||
+      "Objeto não informado",
 
     orgao:
-      item?.orgaoEntidade
-        ?.razaoSocial ??
-      undefined,
+      item.orgaoEntidade
+        ?.razaoSocial,
 
     uf:
-      item?.unidadeOrgao
-        ?.ufSigla ??
-      item?.orgaoEntidade?.uf ??
-      undefined,
+      item.unidadeOrgao
+        ?.ufSigla,
 
     municipio:
-      item?.unidadeOrgao
-        ?.municipioNome ??
-      item?.orgaoEntidade
-        ?.municipio ??
-      undefined,
+      item.unidadeOrgao
+        ?.municipioNome,
 
     modalidade:
-      item?.modalidadeNome ??
-      undefined,
+      item.modalidadeNome,
 
     valorEstimado:
-      Number.isFinite(
-        estimatedValue
-      ) &&
-      estimatedValue > 0
-        ? estimatedValue
-        : undefined,
+      item.valorTotalEstimado,
 
     dataPublicacao:
-      item?.dataPublicacaoPncp ??
-      item?.dataInclusao ??
-      undefined,
+      item.dataPublicacaoPncp ||
+      item.dataInclusao,
 
     prazoEncerramento:
-      item?.dataEncerramentoProposta ??
-      undefined,
+      item.dataEncerramentoProposta,
 
     url:
-      item?.linkSistemaOrigem ??
-      item?.linkProcessoEletronico ??
-      undefined,
+      item.linkSistemaOrigem ||
+      item.linkProcessoEletronico,
 
     fonte: "PNCP",
   };
 }
 
-// ======================================================
-// Controle de cancelamento
-// ======================================================
+/*
+ * =====================================================
+ * ERROS / RETRY
+ * =====================================================
+ */
 
-function createAbortError() {
-  return new DOMException(
-    "Operação cancelada",
-    "AbortError"
-  );
-}
-
-function createCombinedSignal(
-  externalSignal:
-    | AbortSignal
-    | undefined,
-  timeoutMs: number
-) {
-  const controller =
-    new AbortController();
-
-  const abortFromExternal =
-    () => {
-      controller.abort(
-        externalSignal?.reason
-      );
-    };
-
-  if (externalSignal?.aborted) {
-    controller.abort(
-      externalSignal.reason
-    );
-  } else {
-    externalSignal?.addEventListener(
-      "abort",
-      abortFromExternal,
-      {
-        once: true,
-      }
-    );
-  }
-
-  const timeout =
-    setTimeout(() => {
-      controller.abort(
-        new Error(
-          `Timeout PNCP após ${timeoutMs}ms`
-        )
-      );
-    }, timeoutMs);
-
-  function cleanup() {
-    clearTimeout(timeout);
-
-    externalSignal?.removeEventListener(
-      "abort",
-      abortFromExternal
-    );
-  }
-
-  return {
-    signal: controller.signal,
-    cleanup,
-  };
-}
-
-// ======================================================
-// Consulta HTTP
-// ======================================================
-
-function isRetryableStatus(
+function erroTemporario(
   status: number
 ) {
   return (
     status === 429 ||
-    status === 500 ||
     status === 502 ||
     status === 503 ||
     status === 504
   );
 }
 
-async function fetchPncpJson(
-  url: string,
-  options?: {
-    timeoutMs?: number;
-    maxAttempts?: number;
-    signal?: AbortSignal;
-  }
+function mensagemErroPNCP(
+  status: number
 ) {
-  const timeoutMs =
-    options?.timeoutMs ??
-    PNCP_TIMEOUT_MS;
-
-  const maxAttempts =
-    Math.max(
-      1,
-      options?.maxAttempts ??
-        PNCP_MAX_ATTEMPTS
+  if (status === 429) {
+    return (
+      "O PNCP atingiu temporariamente o limite de consultas. " +
+      "Aguarde alguns instantes e tente novamente."
     );
+  }
 
-  let lastError:
-    | unknown
-    | null = null;
+  if (
+    status === 502 ||
+    status === 503 ||
+    status === 504
+  ) {
+    return (
+      "O PNCP está temporariamente indisponível ou instável. " +
+      "Tente realizar a pesquisa novamente em alguns instantes."
+    );
+  }
+
+  return null;
+}
+
+/*
+ * =====================================================
+ * CONSULTA DE UMA PÁGINA DO PNCP
+ * =====================================================
+ */
+
+async function consultarPaginaPNCP({
+  dataFinal,
+  modalidade,
+  pagina,
+  tamanhoPagina,
+  signal,
+}: {
+  dataFinal: string;
+
+  modalidade?: string;
+
+  pagina: number;
+
+  tamanhoPagina: number;
+
+  signal?: AbortSignal;
+}): Promise<RespostaPNCP> {
+  const url =
+    new URL(PNCP_URL);
+
+  url.searchParams.set(
+    "dataFinal",
+    formatarDataPNCP(
+      dataFinal
+    )
+  );
+
+  if (modalidade) {
+    url.searchParams.set(
+      "codigoModalidadeContratacao",
+      modalidade
+    );
+  }
+
+  url.searchParams.set(
+    "pagina",
+    String(pagina)
+  );
+
+  url.searchParams.set(
+    "tamanhoPagina",
+    String(tamanhoPagina)
+  );
+
+  let ultimoErro:
+    Error | null = null;
 
   for (
-    let attempt = 1;
-    attempt <= maxAttempts;
-    attempt++
+    let tentativa = 1;
+    tentativa <=
+    MAX_TENTATIVAS;
+    tentativa++
   ) {
-    if (
-      options?.signal?.aborted
-    ) {
-      throw createAbortError();
+    /*
+     * Se a rota externa cancelou a operação,
+     * não devemos continuar tentando.
+     */
+    if (signal?.aborted) {
+      throw new Error(
+        "Consulta ao PNCP cancelada."
+      );
     }
 
-    const {
-      signal,
-      cleanup,
-    } = createCombinedSignal(
-      options?.signal,
-      timeoutMs
+    const controller =
+      new AbortController();
+
+    const timeout =
+      setTimeout(
+        () => {
+          controller.abort();
+        },
+        TIMEOUT_PNCP_MS
+      );
+
+    /*
+     * Permite respeitar também
+     * um AbortSignal recebido de fora.
+     */
+    const cancelar =
+      () => {
+        controller.abort();
+      };
+
+    signal?.addEventListener(
+      "abort",
+      cancelar,
+      {
+        once: true,
+      }
     );
 
     try {
-      const response =
-        await fetch(url, {
-          method: "GET",
+      const resposta =
+        await fetch(
+          url.toString(),
+          {
+            method: "GET",
 
-          headers: {
-            Accept:
-              "application/json",
+            headers: {
+              Accept:
+                "application/json",
+            },
 
-            "User-Agent":
-              "Radar-Licitacoes/1.0",
-          },
+            cache:
+              "no-store",
 
-          cache: "no-store",
-          signal,
-        });
+            signal:
+              controller.signal,
+          }
+        );
 
-      const responseText =
-        await response
-          .text()
-          .catch(() => "");
+      if (resposta.ok) {
+        return (
+          await resposta.json()
+        ) as RespostaPNCP;
+      }
 
-      if (!response.ok) {
-        const detail =
-          responseText
-            .slice(0, 300)
-            .trim() ||
-          response.statusText ||
-          "Erro no PNCP";
+      const mensagemAmigavel =
+        mensagemErroPNCP(
+          resposta.status
+        );
 
-        const error =
+      /*
+       * Falha temporária.
+       */
+      if (
+        erroTemporario(
+          resposta.status
+        )
+      ) {
+        ultimoErro =
           new Error(
-            `PNCP erro ${response.status}: ${detail}`
-          ) as Error & {
-            status?: number;
-          };
-
-        error.status =
-          response.status;
+            mensagemAmigavel ||
+              `PNCP erro ${resposta.status}.`
+          );
 
         /*
-         * Não efetuamos retry interno por padrão.
-         * A rota da API decidirá se deve tentar novamente.
+         * Se ainda há tentativas,
+         * esperamos antes de repetir.
          */
-        throw error;
+        if (
+          tentativa <
+          MAX_TENTATIVAS
+        ) {
+          /*
+           * 429 espera mais.
+           */
+          const espera =
+            resposta.status ===
+            429
+              ? 5000
+              : 2000 *
+                tentativa;
+
+          await aguardar(
+            espera
+          );
+
+          continue;
+        }
+
+        throw ultimoErro;
       }
 
-      try {
-        return JSON.parse(
-          responseText
-        );
-      } catch {
-        throw new Error(
-          `PNCP retornou uma resposta inválida: ${responseText.slice(
-            0,
-            200
-          )}`
-        );
-      }
-    } catch (error: any) {
-      lastError = error;
+      /*
+       * Outros erros não devem ser
+       * repetidos automaticamente.
+       */
+      const corpo =
+        await resposta
+          .text()
+          .catch(
+            () => ""
+          );
 
+      throw new Error(
+        `PNCP erro ${resposta.status}${
+          corpo
+            ? `: ${corpo.slice(
+                0,
+                300
+              )}`
+            : ""
+        }`
+      );
+    } catch (erro) {
       if (
-        options?.signal?.aborted
+        erro instanceof Error
       ) {
-        throw createAbortError();
-      }
-
-      if (
-        error?.name ===
-        "AbortError"
-      ) {
-        throw new Error(
-          `Timeout PNCP após ${timeoutMs}ms`
-        );
-      }
-
-      const status =
-        Number(
-          error?.status || 0
-        );
-
-      const canRetry =
-        attempt < maxAttempts &&
-        (isRetryableStatus(
-          status
-        ) ||
-          String(
-            error?.message || ""
+        /*
+         * Erros que nós mesmos geramos
+         * por status HTTP.
+         */
+        if (
+          erro.message.startsWith(
+            "PNCP erro"
+          ) ||
+          erro.message.includes(
+            "limite de consultas"
+          ) ||
+          erro.message.includes(
+            "temporariamente indisponível"
           )
-            .toLowerCase()
-            .includes(
-              "fetch failed"
-            ));
+        ) {
+          throw erro;
+        }
 
-      if (!canRetry) {
-        throw error;
+        ultimoErro = erro;
+      } else {
+        ultimoErro =
+          new Error(
+            "Erro desconhecido ao consultar o PNCP."
+          );
+      }
+
+      /*
+       * Abort externo.
+       */
+      if (signal?.aborted) {
+        throw new Error(
+          "Consulta ao PNCP cancelada."
+        );
+      }
+
+      /*
+       * Timeout/rede:
+       * tenta novamente.
+       */
+      if (
+        tentativa <
+        MAX_TENTATIVAS
+      ) {
+        await aguardar(
+          2000 *
+            tentativa
+        );
+
+        continue;
       }
     } finally {
-      cleanup();
+      clearTimeout(
+        timeout
+      );
+
+      signal?.removeEventListener(
+        "abort",
+        cancelar
+      );
     }
   }
 
   throw (
-    lastError ??
+    ultimoErro ||
     new Error(
-      "Falha ao consultar o PNCP."
+      "Não foi possível consultar o PNCP."
     )
   );
 }
 
-// ======================================================
-// API pública
-// ======================================================
+/*
+ * =====================================================
+ * FILTROS DO RADAR
+ * =====================================================
+ */
 
-export async function searchPncp(
-  params: SearchParams,
-  signal?: AbortSignal
-): Promise<Licitacao[]> {
-  if (!baseUrl) {
-    throw new Error(
-      "PNCP_BASE_URL não definida nas variáveis de ambiente."
+function itemAtendeFiltros(
+  item: LicitacaoPNCP,
+  filtros: FiltrosPesquisaRadar
+) {
+  /*
+   * TERMO
+   */
+  const termo =
+    normalizarTexto(
+      filtros.termo
     );
+
+  if (termo) {
+    const textoItem =
+      normalizarTexto(
+        [
+          item.objetoCompra,
+
+          item
+            .informacaoComplementar,
+
+          item
+            .orgaoEntidade
+            ?.razaoSocial,
+
+          item
+            .unidadeOrgao
+            ?.nomeUnidade,
+
+          item
+            .unidadeOrgao
+            ?.municipioNome,
+        ]
+          .filter(Boolean)
+          .join(" ")
+      );
+
+    if (
+      !textoItem.includes(
+        termo
+      )
+    ) {
+      return false;
+    }
   }
 
-  if (signal?.aborted) {
-    throw createAbortError();
+  /*
+   * UF
+   */
+  if (filtros.uf) {
+    const ufItem =
+      item.unidadeOrgao
+        ?.ufSigla
+        ?.toUpperCase();
+
+    if (
+      ufItem !==
+      filtros.uf.toUpperCase()
+    ) {
+      return false;
+    }
   }
 
-  const initialDateISO =
-    params.dataIni ??
-    diasAtrasISO(90);
-
-  const finalDateISO =
-    params.dataFim ??
-    hojeISO();
+  /*
+   * ENCERRAMENTO
+   */
+  const encerramento =
+    item
+      .dataEncerramentoProposta
+      ?.slice(
+        0,
+        10
+      );
 
   if (
-    initialDateISO >
-    finalDateISO
+    filtros
+      .encerramentoInicio
   ) {
-    throw new Error(
-      "A data inicial não pode ser posterior à data final."
-    );
+    if (
+      !encerramento ||
+      encerramento <
+        filtros
+          .encerramentoInicio
+    ) {
+      return false;
+    }
   }
 
-  const initialDate =
-    toYYYYMMDD(
-      initialDateISO
-    );
-
-  const finalDate =
-    toYYYYMMDD(
-      finalDateISO
-    );
-
-  const modalityCode =
-    params
-      .codigoModalidadeContratacao
-      ?.trim() || "8";
-
-  const page =
-    safePage(params.page);
-
-  const pageSize =
-    safePageSize(
-      params.pageSize
-    );
-
-  const dateWindows =
-    splitIntoWindows(
-      initialDate,
-      finalDate
-    );
-
-  const result:
-    Licitacao[] = [];
-
-  const seen =
-    new Set<string>();
-
-  for (
-    const dateWindow
-    of dateWindows
+  if (
+    filtros
+      .encerramentoFim
   ) {
-    if (signal?.aborted) {
-      throw createAbortError();
+    if (
+      !encerramento ||
+      encerramento >
+        filtros
+          .encerramentoFim
+    ) {
+      return false;
     }
+  }
 
-    const normalizedBaseUrl =
-      baseUrl.replace(
-        /\/+$/,
-        ""
-      );
-
-    const url =
-      new URL(
-        `${normalizedBaseUrl}/contratacoes/publicacao`
-      );
-
-    const searchTerm =
-      params.q?.trim();
-
-    const uf =
-      params.uf
-        ?.trim()
-        .toUpperCase();
-
-    if (searchTerm) {
-      url.searchParams.set(
-        "palavraChave",
-        searchTerm
-      );
-    }
-
-    if (uf) {
-      url.searchParams.set(
-        "uf",
-        uf
-      );
-    }
-
-    url.searchParams.set(
-      "dataInicial",
-      dateWindow.ini
+  /*
+   * VALOR ESTIMADO
+   *
+   * Mantém a regra existente no n8n.
+   */
+  const valor =
+    Number(
+      item
+        .valorTotalEstimado ||
+        0
     );
 
-    url.searchParams.set(
-      "dataFinal",
-      dateWindow.fim
+  if (
+    !Number.isFinite(
+      valor
+    ) ||
+    valor <= 0
+  ) {
+    return false;
+  }
+
+  /*
+   * LINK
+   */
+  const link =
+    item
+      .linkSistemaOrigem ||
+    item
+      .linkProcessoEletronico;
+
+  if (!link) {
+    return false;
+  }
+
+  /*
+   * SITUAÇÃO
+   */
+  const situacao =
+    normalizarTexto(
+      item
+        .situacaoCompraNome
     );
 
-    url.searchParams.set(
-      "codigoModalidadeContratacao",
-      modalityCode
-    );
+  if (
+    situacao.includes(
+      "anulada"
+    ) ||
+    situacao.includes(
+      "suspensa"
+    ) ||
+    situacao.includes(
+      "revogada"
+    )
+  ) {
+    return false;
+  }
 
-    url.searchParams.set(
-      "pagina",
-      String(page)
-    );
+  return true;
+}
 
-    url.searchParams.set(
-      "tamanhoPagina",
-      String(pageSize)
-    );
+/*
+ * =====================================================
+ * PESQUISA MANUAL DO RADAR
+ * =====================================================
+ *
+ * Utilizada por:
+ *
+ * POST /api/licitacoes/buscar
+ */
+export async function buscarLicitacoesRadar(
+  filtros: FiltrosPesquisaRadar
+): Promise<ResultadoPesquisaRadar> {
+  /*
+   * Se não for informada data final,
+   * mantém a regra de próximo dia útil.
+   */
+  const dataFinal =
+    filtros
+      .encerramentoFim ||
+    calcularProximoDiaUtil();
 
-    const json =
-      await fetchPncpJson(
-        url.toString(),
-        {
-          timeoutMs:
-            PNCP_TIMEOUT_MS,
+  let pagina = 1;
 
-          maxAttempts:
-            PNCP_MAX_ATTEMPTS,
+  let paginasProcessadas =
+    0;
 
-          signal,
-        }
-      );
+  let quantidadeRecebida =
+    0;
 
-    const rawItems =
+  const mapa =
+    new Map<
+      string,
+      LicitacaoPNCP
+    >();
+
+  while (
+    pagina <=
+    LIMITE_PAGINAS
+  ) {
+    const dados =
+      await consultarPaginaPNCP({
+        dataFinal,
+
+        modalidade:
+          filtros
+            .codigoModalidadeContratacao ||
+          "6",
+
+        pagina,
+
+        tamanhoPagina:
+          TAMANHO_PAGINA,
+      });
+
+    paginasProcessadas++;
+
+    const itens =
       Array.isArray(
-        json?.data
+        dados.data
       )
-        ? json.data
+        ? dados.data
         : [];
 
-    for (
-      const rawItem
-      of rawItems
-    ) {
-      const licitacao =
-        mapPncpToLicitacao(
-          rawItem
-        );
+    quantidadeRecebida +=
+      itens.length;
 
+    for (
+      const item of itens
+    ) {
       if (
-        seen.has(
-          licitacao.id
+        !itemAtendeFiltros(
+          item,
+          filtros
         )
       ) {
         continue;
       }
 
-      seen.add(
-        licitacao.id
-      );
+      const id =
+        criarIdentificadorPNCP(
+          item
+        );
 
-      result.push(
-        licitacao
-      );
+      if (!id) {
+        continue;
+      }
+
+      /*
+       * Não duplica a mesma oportunidade.
+       */
+      if (
+        !mapa.has(id)
+      ) {
+        mapa.set(
+          id,
+          item
+        );
+      }
     }
+
+    const totalPaginas =
+      Number(
+        dados.totalPaginas ??
+          dados.totalDePaginas ??
+          dados.totalPages ??
+          0
+      ) || 0;
+
+    const terminouPeloTotal =
+      totalPaginas > 0 &&
+      pagina >=
+        totalPaginas;
+
+    const terminouPelaQuantidade =
+      itens.length <
+      TAMANHO_PAGINA;
+
+    if (
+      terminouPeloTotal ||
+      terminouPelaQuantidade
+    ) {
+      break;
+    }
+
+    pagina++;
+
+    /*
+     * Mesma estratégia do n8n:
+     * aguarda antes da próxima página.
+     */
+    await aguardar(
+      INTERVALO_ENTRE_PAGINAS_MS
+    );
   }
 
-  return result;
+  return {
+    itens: [
+      ...mapa.values(),
+    ],
+
+    paginasProcessadas,
+
+    quantidadeRecebida,
+  };
+}
+
+/*
+ * =====================================================
+ * PESQUISA ANTIGA DO SISTEMA
+ * =====================================================
+ *
+ * Mantida para compatibilidade com:
+ *
+ * GET /api/licitacoes
+ */
+export async function searchPncp(
+  params: SearchParams,
+  signal?: AbortSignal
+): Promise<Licitacao[]> {
+  const pagina =
+    Math.max(
+      1,
+      Number(
+        params.page || 1
+      )
+    );
+
+  const tamanhoPagina =
+    Math.max(
+      10,
+      Math.min(
+        50,
+        Number(
+          params.pageSize ||
+            50
+        )
+      )
+    );
+
+  const dataFinal =
+    params.dataFim ||
+    params.encFim ||
+    dataHojeBrasil();
+
+  const dados =
+    await consultarPaginaPNCP({
+      dataFinal,
+
+      modalidade:
+        params
+          .codigoModalidadeContratacao,
+
+      pagina,
+
+      tamanhoPagina,
+
+      signal,
+    });
+
+  const itens =
+    Array.isArray(
+      dados.data
+    )
+      ? dados.data
+      : [];
+
+  const termo =
+    normalizarTexto(
+      params.q
+    );
+
+  let filtrados =
+    itens.filter(
+      (item) => {
+        /*
+         * Busca textual.
+         */
+        if (termo) {
+          const texto =
+            normalizarTexto(
+              [
+                item.objetoCompra,
+
+                item
+                  .informacaoComplementar,
+
+                item
+                  .orgaoEntidade
+                  ?.razaoSocial,
+
+                item
+                  .unidadeOrgao
+                  ?.nomeUnidade,
+
+                item
+                  .unidadeOrgao
+                  ?.municipioNome,
+              ]
+                .filter(
+                  Boolean
+                )
+                .join(
+                  " "
+                )
+            );
+
+          if (
+            !texto.includes(
+              termo
+            )
+          ) {
+            return false;
+          }
+        }
+
+        /*
+         * UF.
+         */
+        if (params.uf) {
+          if (
+            item
+              .unidadeOrgao
+              ?.ufSigla
+              ?.toUpperCase() !==
+            params.uf
+              .toUpperCase()
+          ) {
+            return false;
+          }
+        }
+
+        return true;
+      }
+    );
+
+  /*
+   * Publicação inicial.
+   */
+  if (params.dataIni) {
+    filtrados =
+      filtrados.filter(
+        (item) => {
+          const data =
+            (
+              item
+                .dataPublicacaoPncp ||
+              item.dataInclusao ||
+              ""
+            ).slice(
+              0,
+              10
+            );
+
+          return (
+            Boolean(data) &&
+            data >=
+              params.dataIni!
+          );
+        }
+      );
+  }
+
+  /*
+   * Publicação final.
+   */
+  if (params.dataFim) {
+    filtrados =
+      filtrados.filter(
+        (item) => {
+          const data =
+            (
+              item
+                .dataPublicacaoPncp ||
+              item.dataInclusao ||
+              ""
+            ).slice(
+              0,
+              10
+            );
+
+          return (
+            Boolean(data) &&
+            data <=
+              params.dataFim!
+          );
+        }
+      );
+  }
+
+  return filtrados
+    .map(
+      converterParaLicitacao
+    )
+    .filter(
+      (
+        item
+      ): item is Licitacao =>
+        item !== null
+    );
 }
