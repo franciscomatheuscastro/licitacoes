@@ -77,8 +77,84 @@ type Resultado = {
 
   quantidadeRecebida?: number;
 
+  limitePaginasAtingido?: boolean;
+
   erro?: string;
 };
+
+async function lerResposta(
+  resposta: Response
+): Promise<Resultado> {
+  const contentType =
+    resposta.headers.get(
+      "content-type"
+    ) || "";
+
+  /*
+   * Resposta normal da nossa API.
+   */
+  if (
+    contentType.includes(
+      "application/json"
+    )
+  ) {
+    try {
+      return (
+        await resposta.json()
+      ) as Resultado;
+    } catch {
+      throw new Error(
+        "O servidor retornou uma resposta inválida."
+      );
+    }
+  }
+
+  /*
+   * Quando a infraestrutura da Vercel encerra
+   * a Function, ela pode responder texto/HTML.
+   */
+  const texto =
+    await resposta
+      .text()
+      .catch(
+        () => ""
+      );
+
+  if (
+    resposta.status ===
+    504
+  ) {
+    throw new Error(
+      "A pesquisa demorou mais do que o permitido pelo servidor. Tente novamente ou utilize um período menor."
+    );
+  }
+
+  if (
+    resposta.status ===
+    429
+  ) {
+    throw new Error(
+      "O PNCP atingiu temporariamente o limite de consultas. Aguarde alguns instantes e tente novamente."
+    );
+  }
+
+  if (
+    resposta.status >= 500
+  ) {
+    throw new Error(
+      "O servidor não conseguiu concluir a pesquisa. Tente novamente em alguns instantes."
+    );
+  }
+
+  throw new Error(
+    texto
+      ? texto.slice(
+          0,
+          200
+        )
+      : `Erro ${resposta.status} ao realizar a pesquisa.`
+  );
+}
 
 export default function BotaoPesquisa() {
   const router =
@@ -144,7 +220,27 @@ export default function BotaoPesquisa() {
       return;
     }
 
+    /*
+     * Validação no cliente também.
+     */
+    if (
+      encerramentoInicio &&
+      encerramentoFim &&
+      encerramentoInicio >
+        encerramentoFim
+    ) {
+      setResultado({
+        sucesso: false,
+
+        erro:
+          "A data inicial não pode ser posterior à data final.",
+      });
+
+      return;
+    }
+
     setPesquisando(true);
+
     setResultado(null);
 
     try {
@@ -157,7 +253,13 @@ export default function BotaoPesquisa() {
             headers: {
               "Content-Type":
                 "application/json",
+
+              Accept:
+                "application/json",
             },
+
+            cache:
+              "no-store",
 
             body:
               JSON.stringify({
@@ -181,8 +283,16 @@ export default function BotaoPesquisa() {
           }
         );
 
+      /*
+       * Não usamos resposta.json() diretamente.
+       *
+       * Em produção a Vercel pode responder
+       * texto caso a Function seja interrompida.
+       */
       const dados =
-        (await resposta.json()) as Resultado;
+        await lerResposta(
+          resposta
+        );
 
       if (
         !resposta.ok ||
@@ -200,16 +310,23 @@ export default function BotaoPesquisa() {
 
       router.refresh();
     } catch (erro) {
+      console.error(
+        "[PESQUISA PNCP]",
+        erro
+      );
+
       setResultado({
         sucesso: false,
 
         erro:
           erro instanceof Error
             ? erro.message
-            : "Erro desconhecido.",
+            : "Não foi possível concluir a pesquisa.",
       });
     } finally {
-      setPesquisando(false);
+      setPesquisando(
+        false
+      );
     }
   }
 
@@ -219,6 +336,7 @@ export default function BotaoPesquisa() {
         type="button"
         onClick={() => {
           setResultado(null);
+
           setAberto(true);
         }}
         className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
@@ -243,6 +361,8 @@ export default function BotaoPesquisa() {
       {aberto && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-[1px]">
           <div className="w-full max-w-xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            {/* CABEÇALHO */}
+
             <div className="flex items-start justify-between border-b border-slate-200 px-6 py-5">
               <div>
                 <h2 className="text-xl font-bold text-slate-950">
@@ -260,9 +380,11 @@ export default function BotaoPesquisa() {
                   pesquisando
                 }
                 onClick={() =>
-                  setAberto(false)
+                  setAberto(
+                    false
+                  )
                 }
-                className="rounded-lg px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 disabled:opacity-50"
+                className="rounded-lg px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Fechar
               </button>
@@ -274,6 +396,8 @@ export default function BotaoPesquisa() {
               }
               className="space-y-5 px-6 py-5"
             >
+              {/* TERMO */}
+
               <div>
                 <label className="mb-2 block text-sm font-semibold text-slate-800">
                   Termo de busca
@@ -283,6 +407,9 @@ export default function BotaoPesquisa() {
                   type="text"
                   value={
                     termo
+                  }
+                  disabled={
+                    pesquisando
                   }
                   onChange={(
                     event
@@ -294,13 +421,17 @@ export default function BotaoPesquisa() {
                     )
                   }
                   placeholder="Ex.: médico"
-                  className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:opacity-70"
                 />
 
                 <p className="mt-2 text-xs font-medium leading-5 text-slate-500">
-                  A pesquisa considera objeto, informações complementares e órgão.
+                  A pesquisa considera objeto,
+                  informações complementares e
+                  órgão.
                 </p>
               </div>
+
+              {/* UF E MODALIDADE */}
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
@@ -312,6 +443,9 @@ export default function BotaoPesquisa() {
                     value={
                       uf
                     }
+                    disabled={
+                      pesquisando
+                    }
                     onChange={(
                       event
                     ) =>
@@ -321,7 +455,7 @@ export default function BotaoPesquisa() {
                           .value
                       )
                     }
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:opacity-70"
                   >
                     <option value="">
                       Todas
@@ -385,6 +519,9 @@ export default function BotaoPesquisa() {
                     value={
                       modalidade
                     }
+                    disabled={
+                      pesquisando
+                    }
                     onChange={(
                       event
                     ) =>
@@ -394,7 +531,7 @@ export default function BotaoPesquisa() {
                           .value
                       )
                     }
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:opacity-70"
                   >
                     <option value="6">
                       Pregão eletrônico
@@ -402,6 +539,8 @@ export default function BotaoPesquisa() {
                   </select>
                 </div>
               </div>
+
+              {/* ENCERRAMENTO */}
 
               <div>
                 <p className="mb-3 text-sm font-semibold text-slate-800">
@@ -419,6 +558,9 @@ export default function BotaoPesquisa() {
                       value={
                         encerramentoInicio
                       }
+                      disabled={
+                        pesquisando
+                      }
                       onChange={(
                         event
                       ) =>
@@ -428,7 +570,7 @@ export default function BotaoPesquisa() {
                             .value
                         )
                       }
-                      className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:opacity-70"
                     />
                   </div>
 
@@ -442,6 +584,9 @@ export default function BotaoPesquisa() {
                       value={
                         encerramentoFim
                       }
+                      disabled={
+                        pesquisando
+                      }
                       onChange={(
                         event
                       ) =>
@@ -451,81 +596,117 @@ export default function BotaoPesquisa() {
                             .value
                         )
                       }
-                      className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:opacity-70"
                     />
                   </div>
                 </div>
               </div>
 
-              {resultado && (
-                <div
-                  className={
-                    resultado
-                      .sucesso
-                      ? "rounded-xl border border-emerald-200 bg-emerald-50 p-4"
-                      : "rounded-xl border border-red-200 bg-red-50 p-4"
-                  }
-                >
-                  {resultado
-                    .sucesso ? (
-                    <>
-                      <p className="text-sm font-bold text-emerald-900">
-                        Pesquisa concluída.
-                      </p>
+              {/* PESQUISANDO */}
 
-                      <div className="mt-3 grid grid-cols-2 gap-3 text-sm font-medium text-emerald-800">
-                        <p>
-                          Encontradas:{" "}
-                          <strong>
-                            {
-                              resultado.encontradas
-                            }
-                          </strong>
-                        </p>
+              {pesquisando && (
+                <div className="flex items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4">
+                  <div className="h-5 w-5 animate-spin rounded-full border-2 border-blue-200 border-t-blue-600" />
 
-                        <p>
-                          Salvas:{" "}
-                          <strong>
-                            {
-                              resultado.salvas
-                            }
-                          </strong>
-                        </p>
+                  <div>
+                    <p className="text-sm font-semibold text-blue-900">
+                      Consultando o PNCP...
+                    </p>
 
-                        <p>
-                          Páginas:{" "}
-                          <strong>
-                            {
-                              resultado.paginasProcessadas
-                            }
-                          </strong>
-                        </p>
-
-                        <p>
-                          Erros:{" "}
-                          <strong>
-                            {
-                              resultado.erros
-                            }
-                          </strong>
-                        </p>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <p className="text-sm font-bold text-red-900">
-                        Não foi possível realizar a pesquisa.
-                      </p>
-
-                      <p className="mt-2 text-sm font-medium leading-6 text-red-800">
-                        {
-                          resultado.erro
-                        }
-                      </p>
-                    </>
-                  )}
+                    <p className="mt-0.5 text-xs font-medium text-blue-700">
+                      Isso pode levar alguns
+                      segundos.
+                    </p>
+                  </div>
                 </div>
               )}
+
+              {/* RESULTADO */}
+
+              {resultado &&
+                !pesquisando && (
+                  <div
+                    className={
+                      resultado
+                        .sucesso
+                        ? "rounded-xl border border-emerald-200 bg-emerald-50 p-4"
+                        : "rounded-xl border border-red-200 bg-red-50 p-4"
+                    }
+                  >
+                    {resultado
+                      .sucesso ? (
+                      <>
+                        <p className="text-sm font-bold text-emerald-900">
+                          Pesquisa concluída.
+                        </p>
+
+                        <div className="mt-3 grid grid-cols-2 gap-3 text-sm font-medium text-emerald-800">
+                          <p>
+                            Encontradas:{" "}
+                            <strong>
+                              {
+                                resultado.encontradas
+                              }
+                            </strong>
+                          </p>
+
+                          <p>
+                            Salvas:{" "}
+                            <strong>
+                              {
+                                resultado.salvas
+                              }
+                            </strong>
+                          </p>
+
+                          <p>
+                            Páginas:{" "}
+                            <strong>
+                              {
+                                resultado.paginasProcessadas
+                              }
+                            </strong>
+                          </p>
+
+                          <p>
+                            Erros:{" "}
+                            <strong>
+                              {
+                                resultado.erros
+                              }
+                            </strong>
+                          </p>
+                        </div>
+
+                        {resultado
+                          .limitePaginasAtingido && (
+                          <p className="mt-3 border-t border-emerald-200 pt-3 text-xs font-medium leading-5 text-emerald-800">
+                            A consulta atingiu o
+                            limite técnico desta
+                            pesquisa. Podem existir
+                            outras oportunidades no
+                            PNCP.
+                          </p>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-sm font-bold text-red-900">
+                          Não foi possível realizar
+                          a pesquisa.
+                        </p>
+
+                        <p className="mt-2 text-sm font-medium leading-6 text-red-800">
+                          {
+                            resultado.erro
+                          }
+                        </p>
+                      </>
+                    )}
+                  </div>
+                )}
+
+              {/* BOTÕES */}
 
               <div className="flex justify-end gap-3 border-t border-slate-200 pt-5">
                 <button
@@ -534,9 +715,11 @@ export default function BotaoPesquisa() {
                     pesquisando
                   }
                   onClick={() =>
-                    setAberto(false)
+                    setAberto(
+                      false
+                    )
                   }
-                  className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-slate-900 disabled:opacity-50"
+                  className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Cancelar
                 </button>
@@ -546,7 +729,7 @@ export default function BotaoPesquisa() {
                   disabled={
                     pesquisando
                   }
-                  className="inline-flex min-w-[150px] items-center justify-center rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="inline-flex min-w-[155px] items-center justify-center rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {pesquisando
                     ? "Pesquisando..."

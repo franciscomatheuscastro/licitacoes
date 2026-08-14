@@ -11,31 +11,33 @@ const PNCP_URL =
 const TAMANHO_PAGINA = 50;
 
 /*
- * Como a pesquisa agora é feita manualmente por uma rota HTTP,
- * não podemos deixar uma execução percorrer centenas de páginas.
+ * IMPORTANTE:
  *
- * 20 páginas x 50 registros = até 1.000 registros brutos.
+ * Esta pesquisa acontece dentro de uma Route Handler da Vercel.
+ * Não podemos percorrer 200 páginas em uma única requisição.
  *
- * Depois podemos evoluir isso para processamento em background,
- * caso realmente seja necessário pesquisar volumes maiores.
+ * 8 páginas x 50 registros = até 400 registros brutos.
+ *
+ * Depois podemos evoluir para uma busca em lotes/background
+ * para percorrer todas as páginas sem limite de execução HTTP.
  */
-const LIMITE_PAGINAS = 200;
+const LIMITE_PAGINAS = 8;
 
 /*
- * Seu fluxo n8n aguardava entre uma página e outra.
- * Mantemos a mesma estratégia para evitar HTTP 429.
+ * Intervalo entre páginas para reduzir risco de HTTP 429.
  */
 const INTERVALO_ENTRE_PAGINAS_MS = 2000;
 
 /*
- * Tentativas apenas para falhas temporárias.
+ * Mantemos poucas tentativas para não estourar
+ * o tempo total da função em produção.
  */
-const MAX_TENTATIVAS = 3;
+const MAX_TENTATIVAS = 2;
 
 /*
- * Timeout individual de cada chamada ao PNCP.
+ * Timeout individual da chamada ao PNCP.
  */
-const TIMEOUT_PNCP_MS = 30000;
+const TIMEOUT_PNCP_MS = 12000;
 
 export interface LicitacaoPNCP {
   numeroControlePNCP?: string;
@@ -81,12 +83,6 @@ interface RespostaPNCP {
   totalPages?: number;
 }
 
-/*
- * =====================================================
- * PESQUISA MANUAL DO RADAR
- * =====================================================
- */
-
 export interface FiltrosPesquisaRadar {
   termo?: string;
 
@@ -104,6 +100,8 @@ export interface ResultadoPesquisaRadar {
   paginasProcessadas: number;
 
   quantidadeRecebida: number;
+
+  limitePaginasAtingido: boolean;
 }
 
 /*
@@ -158,9 +156,7 @@ function dataHojeBrasil() {
     Record<string, string> =
     {};
 
-  for (
-    const parte of partes
-  ) {
+  for (const parte of partes) {
     if (
       parte.type !== "literal"
     ) {
@@ -184,9 +180,6 @@ function formatarDataPNCP(
 
 /*
  * Próximo dia útil.
- *
- * Mantém a mesma lógica utilizada
- * anteriormente no fluxo n8n.
  */
 export function calcularProximoDiaUtil() {
   const hojeTexto =
@@ -215,23 +208,14 @@ export function calcularProximoDiaUtil() {
 
   let adicionar = 1;
 
-  /*
-   * Sexta -> segunda.
-   */
   if (diaSemana === 5) {
     adicionar = 3;
   }
 
-  /*
-   * Sábado -> segunda.
-   */
   if (diaSemana === 6) {
     adicionar = 2;
   }
 
-  /*
-   * Domingo -> segunda.
-   */
   if (diaSemana === 0) {
     adicionar = 1;
   }
@@ -348,7 +332,7 @@ function converterParaLicitacao(
 
 /*
  * =====================================================
- * ERROS / RETRY
+ * ERROS
  * =====================================================
  */
 
@@ -389,7 +373,7 @@ function mensagemErroPNCP(
 
 /*
  * =====================================================
- * CONSULTA DE UMA PÁGINA DO PNCP
+ * CONSULTA PNCP
  * =====================================================
  */
 
@@ -446,10 +430,6 @@ async function consultarPaginaPNCP({
     MAX_TENTATIVAS;
     tentativa++
   ) {
-    /*
-     * Se a rota externa cancelou a operação,
-     * não devemos continuar tentando.
-     */
     if (signal?.aborted) {
       throw new Error(
         "Consulta ao PNCP cancelada."
@@ -459,18 +439,6 @@ async function consultarPaginaPNCP({
     const controller =
       new AbortController();
 
-    const timeout =
-      setTimeout(
-        () => {
-          controller.abort();
-        },
-        TIMEOUT_PNCP_MS
-      );
-
-    /*
-     * Permite respeitar também
-     * um AbortSignal recebido de fora.
-     */
     const cancelar =
       () => {
         controller.abort();
@@ -483,6 +451,14 @@ async function consultarPaginaPNCP({
         once: true,
       }
     );
+
+    const timeout =
+      setTimeout(
+        () => {
+          controller.abort();
+        },
+        TIMEOUT_PNCP_MS
+      );
 
     try {
       const resposta =
@@ -504,19 +480,23 @@ async function consultarPaginaPNCP({
           }
         );
 
+      /*
+       * SUCESSO
+       */
       if (resposta.ok) {
-        return (
-          await resposta.json()
-        ) as RespostaPNCP;
+        try {
+          return (
+            await resposta.json()
+          ) as RespostaPNCP;
+        } catch {
+          throw new Error(
+            "O PNCP retornou uma resposta inválida."
+          );
+        }
       }
 
-      const mensagemAmigavel =
-        mensagemErroPNCP(
-          resposta.status
-        );
-
       /*
-       * Falha temporária.
+       * FALHAS TEMPORÁRIAS
        */
       if (
         erroTemporario(
@@ -525,27 +505,21 @@ async function consultarPaginaPNCP({
       ) {
         ultimoErro =
           new Error(
-            mensagemAmigavel ||
+            mensagemErroPNCP(
+              resposta.status
+            ) ||
               `PNCP erro ${resposta.status}.`
           );
 
-        /*
-         * Se ainda há tentativas,
-         * esperamos antes de repetir.
-         */
         if (
           tentativa <
           MAX_TENTATIVAS
         ) {
-          /*
-           * 429 espera mais.
-           */
           const espera =
             resposta.status ===
             429
               ? 5000
-              : 2000 *
-                tentativa;
+              : 2000;
 
           await aguardar(
             espera
@@ -558,8 +532,7 @@ async function consultarPaginaPNCP({
       }
 
       /*
-       * Outros erros não devem ser
-       * repetidos automaticamente.
+       * OUTROS ERROS HTTP
        */
       const corpo =
         await resposta
@@ -573,7 +546,7 @@ async function consultarPaginaPNCP({
           corpo
             ? `: ${corpo.slice(
                 0,
-                300
+                200
               )}`
             : ""
         }`
@@ -582,10 +555,6 @@ async function consultarPaginaPNCP({
       if (
         erro instanceof Error
       ) {
-        /*
-         * Erros que nós mesmos geramos
-         * por status HTTP.
-         */
         if (
           erro.message.startsWith(
             "PNCP erro"
@@ -595,6 +564,9 @@ async function consultarPaginaPNCP({
           ) ||
           erro.message.includes(
             "temporariamente indisponível"
+          ) ||
+          erro.message.includes(
+            "resposta inválida"
           )
         ) {
           throw erro;
@@ -608,26 +580,18 @@ async function consultarPaginaPNCP({
           );
       }
 
-      /*
-       * Abort externo.
-       */
       if (signal?.aborted) {
         throw new Error(
           "Consulta ao PNCP cancelada."
         );
       }
 
-      /*
-       * Timeout/rede:
-       * tenta novamente.
-       */
       if (
         tentativa <
         MAX_TENTATIVAS
       ) {
         await aguardar(
-          2000 *
-            tentativa
+          2000
         );
 
         continue;
@@ -644,6 +608,15 @@ async function consultarPaginaPNCP({
     }
   }
 
+  if (
+    ultimoErro?.name ===
+    "AbortError"
+  ) {
+    throw new Error(
+      "O PNCP demorou mais do que o esperado para responder."
+    );
+  }
+
   throw (
     ultimoErro ||
     new Error(
@@ -654,7 +627,7 @@ async function consultarPaginaPNCP({
 
 /*
  * =====================================================
- * FILTROS DO RADAR
+ * FILTROS
  * =====================================================
  */
 
@@ -662,9 +635,6 @@ function itemAtendeFiltros(
   item: LicitacaoPNCP,
   filtros: FiltrosPesquisaRadar
 ) {
-  /*
-   * TERMO
-   */
   const termo =
     normalizarTexto(
       filtros.termo
@@ -704,9 +674,6 @@ function itemAtendeFiltros(
     }
   }
 
-  /*
-   * UF
-   */
   if (filtros.uf) {
     const ufItem =
       item.unidadeOrgao
@@ -721,9 +688,6 @@ function itemAtendeFiltros(
     }
   }
 
-  /*
-   * ENCERRAMENTO
-   */
   const encerramento =
     item
       .dataEncerramentoProposta
@@ -761,9 +725,8 @@ function itemAtendeFiltros(
   }
 
   /*
-   * VALOR ESTIMADO
-   *
-   * Mantém a regra existente no n8n.
+   * Regra mantida do fluxo n8n:
+   * somente oportunidades com valor.
    */
   const valor =
     Number(
@@ -781,9 +744,6 @@ function itemAtendeFiltros(
     return false;
   }
 
-  /*
-   * LINK
-   */
   const link =
     item
       .linkSistemaOrigem ||
@@ -794,9 +754,6 @@ function itemAtendeFiltros(
     return false;
   }
 
-  /*
-   * SITUAÇÃO
-   */
   const situacao =
     normalizarTexto(
       item
@@ -822,20 +779,13 @@ function itemAtendeFiltros(
 
 /*
  * =====================================================
- * PESQUISA MANUAL DO RADAR
+ * RADAR MANUAL
  * =====================================================
- *
- * Utilizada por:
- *
- * POST /api/licitacoes/buscar
  */
+
 export async function buscarLicitacoesRadar(
   filtros: FiltrosPesquisaRadar
 ): Promise<ResultadoPesquisaRadar> {
-  /*
-   * Se não for informada data final,
-   * mantém a regra de próximo dia útil.
-   */
   const dataFinal =
     filtros
       .encerramentoFim ||
@@ -848,6 +798,9 @@ export async function buscarLicitacoesRadar(
 
   let quantidadeRecebida =
     0;
+
+  let limitePaginasAtingido =
+    false;
 
   const mapa =
     new Map<
@@ -907,9 +860,6 @@ export async function buscarLicitacoesRadar(
         continue;
       }
 
-      /*
-       * Não duplica a mesma oportunidade.
-       */
       if (
         !mapa.has(id)
       ) {
@@ -944,12 +894,22 @@ export async function buscarLicitacoesRadar(
       break;
     }
 
+    /*
+     * Sabemos que existem mais páginas,
+     * mas atingimos nosso limite técnico.
+     */
+    if (
+      pagina >=
+      LIMITE_PAGINAS
+    ) {
+      limitePaginasAtingido =
+        true;
+
+      break;
+    }
+
     pagina++;
 
-    /*
-     * Mesma estratégia do n8n:
-     * aguarda antes da próxima página.
-     */
     await aguardar(
       INTERVALO_ENTRE_PAGINAS_MS
     );
@@ -963,18 +923,17 @@ export async function buscarLicitacoesRadar(
     paginasProcessadas,
 
     quantidadeRecebida,
+
+    limitePaginasAtingido,
   };
 }
 
 /*
  * =====================================================
- * PESQUISA ANTIGA DO SISTEMA
+ * PESQUISA ANTIGA
  * =====================================================
- *
- * Mantida para compatibilidade com:
- *
- * GET /api/licitacoes
  */
+
 export async function searchPncp(
   params: SearchParams,
   signal?: AbortSignal
@@ -1034,9 +993,6 @@ export async function searchPncp(
   let filtrados =
     itens.filter(
       (item) => {
-        /*
-         * Busca textual.
-         */
         if (termo) {
           const texto =
             normalizarTexto(
@@ -1075,9 +1031,6 @@ export async function searchPncp(
           }
         }
 
-        /*
-         * UF.
-         */
         if (params.uf) {
           if (
             item
@@ -1095,9 +1048,6 @@ export async function searchPncp(
       }
     );
 
-  /*
-   * Publicação inicial.
-   */
   if (params.dataIni) {
     filtrados =
       filtrados.filter(
@@ -1122,9 +1072,6 @@ export async function searchPncp(
       );
   }
 
-  /*
-   * Publicação final.
-   */
   if (params.dataFim) {
     filtrados =
       filtrados.filter(
