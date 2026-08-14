@@ -1,0 +1,58 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+
+model Licitacao {
+  id String @id @default(cuid())
+
+  numeroControlePNCP String @unique
+
+  titulo String
+
+  orgao     String?
+  municipio String?
+  uf        String?
+
+  valorEstimado Decimal?
+
+  dataPublicacao   DateTime?
+  prazoEncerramento DateTime?
+
+  situacaoPNCP String?
+
+  url String?
+
+  status StatusLicitacao @default(NOVA)
+
+  favorita   Boolean @default(false)
+  observacao String?
+
+  criadaEm       DateTime @default(now())
+  atualizadaEm   DateTime @updatedAt
+  verificadaEm   DateTime @default(now())
+
+  @@index([status])
+  @@index([prazoEncerramento])
+  @@index([uf])
+}
+
+enum StatusLicitacao {
+  NOVA
+  EM_ANALISE
+  INTERESSANTE
+  DESCARTADA
+  PARTICIPANDO
+  GANHA
+  PERDIDA
+}
