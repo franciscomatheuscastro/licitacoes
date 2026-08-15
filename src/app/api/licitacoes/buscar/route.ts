@@ -10,8 +10,9 @@ import {
 
 import ServicoBuscaLicitacoes from "@/backend/licitacoes/ServicoBuscaLicitacoes";
 
-import type {
-  FiltrosPesquisaRadar,
+import {
+  LIMITE_TOTAL_PAGINAS,
+  type FiltrosPesquisaRadar,
 } from "@/lib/pncp";
 
 export const runtime =
@@ -20,11 +21,6 @@ export const runtime =
 export const dynamic =
   "force-dynamic";
 
-/*
- * Mantemos 60 segundos como teto da função.
- * A busca precisa ser desenhada para terminar
- * confortavelmente antes desse limite.
- */
 export const maxDuration =
   60;
 
@@ -38,6 +34,8 @@ type BodyPesquisa = {
   encerramentoInicio?: unknown;
 
   encerramentoFim?: unknown;
+
+  paginaInicial?: unknown;
 };
 
 function textoOpcional(
@@ -57,8 +55,30 @@ function textoOpcional(
     undefined;
 }
 
+function numeroPagina(
+  valor: unknown
+) {
+  const numero =
+    Number(valor);
+
+  if (
+    !Number.isFinite(numero) ||
+    numero < 1
+  ) {
+    return 1;
+  }
+
+  return Math.min(
+    LIMITE_TOTAL_PAGINAS,
+    Math.floor(numero)
+  );
+}
+
 function respostaJson(
-  body: Record<string, unknown>,
+  body: Record<
+    string,
+    unknown
+  >,
   status = 200
 ) {
   const resposta =
@@ -69,9 +89,6 @@ function respostaJson(
       }
     );
 
-  /*
-   * Evita cache dessa operação.
-   */
   resposta.headers.set(
     "Cache-Control",
     "no-store, no-cache, must-revalidate"
@@ -140,14 +157,14 @@ function mensagemAmigavel(
       "abort"
     ) ||
     normalizada.includes(
-      "cancelada"
+      "demorou mais"
     )
   ) {
     return {
       status: 504,
 
       mensagem:
-        "A pesquisa demorou mais do que o esperado. Tente novamente ou reduza o período pesquisado.",
+        "O PNCP demorou mais do que o esperado para responder. Tente novamente.",
     };
   }
 
@@ -155,7 +172,7 @@ function mensagemAmigavel(
     status: 500,
 
     mensagem:
-      "Não foi possível concluir a pesquisa. Tente novamente.",
+      "Não foi possível concluir esta etapa da pesquisa. Tente novamente.",
   };
 }
 
@@ -215,9 +232,6 @@ export async function POST(
         ),
     };
 
-    /*
-     * Validação de intervalo.
-     */
     if (
       filtros
         .encerramentoInicio &&
@@ -239,16 +253,18 @@ export async function POST(
       );
     }
 
+    const paginaInicial =
+      numeroPagina(
+        body.paginaInicial
+      );
+
     const resultado =
       await ServicoBuscaLicitacoes
         .executar(
-          filtros
+          filtros,
+          paginaInicial
         );
 
-    /*
-     * Faz a tela consultar novamente
-     * as oportunidades salvas.
-     */
     revalidatePath(
       "/oportunidades"
     );

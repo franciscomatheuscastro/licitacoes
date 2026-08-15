@@ -9,6 +9,19 @@ import {
   useRouter,
 } from "next/navigation";
 
+function aguardar(
+  milissegundos: number
+) {
+  return new Promise<void>(
+    (resolve) => {
+      setTimeout(
+        resolve,
+        milissegundos
+      );
+    }
+  );
+}
+
 function proximoDiaUtil() {
   const agora =
     new Date();
@@ -64,7 +77,7 @@ function proximoDiaUtil() {
   return `${ano}-${mes}-${dia}`;
 }
 
-type Resultado = {
+type ResultadoLote = {
   sucesso: boolean;
 
   encontradas?: number;
@@ -77,22 +90,46 @@ type Resultado = {
 
   quantidadeRecebida?: number;
 
-  limitePaginasAtingido?: boolean;
+  paginaInicial?: number;
+
+  paginaFinal?: number;
+
+  proximaPagina?: number | null;
+
+  concluida?: boolean;
+
+  totalPaginasPNCP?: number | null;
+
+  limiteTotalAtingido?: boolean;
 
   erro?: string;
 };
 
+type Progresso = {
+  paginas: number;
+
+  encontradas: number;
+
+  salvas: number;
+
+  erros: number;
+
+  quantidadeRecebida: number;
+
+  paginaAtual: number;
+
+  totalPaginasPNCP:
+    number | null;
+};
+
 async function lerResposta(
   resposta: Response
-): Promise<Resultado> {
+): Promise<ResultadoLote> {
   const contentType =
     resposta.headers.get(
       "content-type"
     ) || "";
 
-  /*
-   * Resposta normal da nossa API.
-   */
   if (
     contentType.includes(
       "application/json"
@@ -101,7 +138,7 @@ async function lerResposta(
     try {
       return (
         await resposta.json()
-      ) as Resultado;
+      ) as ResultadoLote;
     } catch {
       throw new Error(
         "O servidor retornou uma resposta inválida."
@@ -109,23 +146,16 @@ async function lerResposta(
     }
   }
 
-  /*
-   * Quando a infraestrutura da Vercel encerra
-   * a Function, ela pode responder texto/HTML.
-   */
-  const texto =
-    await resposta
-      .text()
-      .catch(
-        () => ""
-      );
+  await resposta
+    .text()
+    .catch(() => "");
 
   if (
     resposta.status ===
     504
   ) {
     throw new Error(
-      "A pesquisa demorou mais do que o permitido pelo servidor. Tente novamente ou utilize um período menor."
+      "Esta etapa da pesquisa demorou mais do que o permitido pelo servidor."
     );
   }
 
@@ -142,17 +172,12 @@ async function lerResposta(
     resposta.status >= 500
   ) {
     throw new Error(
-      "O servidor não conseguiu concluir a pesquisa. Tente novamente em alguns instantes."
+      "O servidor não conseguiu concluir esta etapa da pesquisa."
     );
   }
 
   throw new Error(
-    texto
-      ? texto.slice(
-          0,
-          200
-        )
-      : `Erro ${resposta.status} ao realizar a pesquisa.`
+    `Erro ${resposta.status} ao realizar a pesquisa.`
   );
 }
 
@@ -207,7 +232,15 @@ export default function BotaoPesquisa() {
     resultado,
     setResultado,
   ] =
-    useState<Resultado | null>(
+    useState<ResultadoLote | null>(
+      null
+    );
+
+  const [
+    progresso,
+    setProgresso,
+  ] =
+    useState<Progresso | null>(
       null
     );
 
@@ -220,9 +253,6 @@ export default function BotaoPesquisa() {
       return;
     }
 
-    /*
-     * Validação no cliente também.
-     */
     if (
       encerramentoInicio &&
       encerramentoFim &&
@@ -243,84 +273,228 @@ export default function BotaoPesquisa() {
 
     setResultado(null);
 
+    setProgresso({
+      paginas: 0,
+      encontradas: 0,
+      salvas: 0,
+      erros: 0,
+      quantidadeRecebida: 0,
+      paginaAtual: 1,
+      totalPaginasPNCP:
+        null,
+    });
+
+    let paginaInicial =
+      1;
+
+    let totalPaginas =
+      0;
+
+    let totalEncontradas =
+      0;
+
+    let totalSalvas =
+      0;
+
+    let totalErros =
+      0;
+
+    let totalRecebidas =
+      0;
+
+    let totalPaginasPNCP:
+      number | null = null;
+
+    let limiteTotalAtingido =
+      false;
+
     try {
-      const resposta =
-        await fetch(
-          "/api/licitacoes/buscar",
-          {
-            method: "POST",
-
-            headers: {
-              "Content-Type":
-                "application/json",
-
-              Accept:
-                "application/json",
-            },
-
-            cache:
-              "no-store",
-
-            body:
-              JSON.stringify({
-                termo,
-
-                uf:
-                  uf ||
-                  undefined,
-
-                codigoModalidadeContratacao:
-                  modalidade,
-
-                encerramentoInicio:
-                  encerramentoInicio ||
-                  undefined,
-
-                encerramentoFim:
-                  encerramentoFim ||
-                  undefined,
-              }),
-          }
-        );
-
       /*
-       * Não usamos resposta.json() diretamente.
+       * Segurança contra loop inesperado.
        *
-       * Em produção a Vercel pode responder
-       * texto caso a Function seja interrompida.
+       * 200 páginas / 8 por lote = 25 lotes.
        */
-      const dados =
-        await lerResposta(
-          resposta
-        );
-
-      if (
-        !resposta.ok ||
-        !dados.sucesso
+      for (
+        let lote = 1;
+        lote <= 30;
+        lote++
       ) {
-        throw new Error(
-          dados.erro ||
-            "Não foi possível realizar a pesquisa."
+        const resposta =
+          await fetch(
+            "/api/licitacoes/buscar",
+            {
+              method: "POST",
+
+              headers: {
+                "Content-Type":
+                  "application/json",
+
+                Accept:
+                  "application/json",
+              },
+
+              cache:
+                "no-store",
+
+              body:
+                JSON.stringify({
+                  termo,
+
+                  uf:
+                    uf ||
+                    undefined,
+
+                  codigoModalidadeContratacao:
+                    modalidade,
+
+                  encerramentoInicio:
+                    encerramentoInicio ||
+                    undefined,
+
+                  encerramentoFim:
+                    encerramentoFim ||
+                    undefined,
+
+                  paginaInicial,
+                }),
+            }
+          );
+
+        const dados =
+          await lerResposta(
+            resposta
+          );
+
+        if (
+          !resposta.ok ||
+          !dados.sucesso
+        ) {
+          throw new Error(
+            dados.erro ||
+              "Não foi possível concluir esta etapa da pesquisa."
+          );
+        }
+
+        totalPaginas +=
+          dados.paginasProcessadas ||
+          0;
+
+        totalEncontradas +=
+          dados.encontradas ||
+          0;
+
+        totalSalvas +=
+          dados.salvas ||
+          0;
+
+        totalErros +=
+          dados.erros ||
+          0;
+
+        totalRecebidas +=
+          dados.quantidadeRecebida ||
+          0;
+
+        if (
+          dados.totalPaginasPNCP
+        ) {
+          totalPaginasPNCP =
+            dados.totalPaginasPNCP;
+        }
+
+        if (
+          dados.limiteTotalAtingido
+        ) {
+          limiteTotalAtingido =
+            true;
+        }
+
+        setProgresso({
+          paginas:
+            totalPaginas,
+
+          encontradas:
+            totalEncontradas,
+
+          salvas:
+            totalSalvas,
+
+          erros:
+            totalErros,
+
+          quantidadeRecebida:
+            totalRecebidas,
+
+          paginaAtual:
+            dados.paginaFinal ||
+            paginaInicial,
+
+          totalPaginasPNCP,
+        });
+
+        /*
+         * Terminou naturalmente.
+         */
+        if (
+          dados.concluida ||
+          !dados.proximaPagina
+        ) {
+          break;
+        }
+
+        paginaInicial =
+          dados.proximaPagina;
+
+        /*
+         * Intervalo entre LOTES.
+         *
+         * O servidor já espera entre páginas.
+         */
+        await aguardar(
+          2000
         );
       }
 
-      setResultado(
-        dados
-      );
+      setResultado({
+        sucesso: true,
+
+        encontradas:
+          totalEncontradas,
+
+        salvas:
+          totalSalvas,
+
+        erros:
+          totalErros,
+
+        paginasProcessadas:
+          totalPaginas,
+
+        quantidadeRecebida:
+          totalRecebidas,
+
+        totalPaginasPNCP,
+
+        limiteTotalAtingido,
+      });
 
       router.refresh();
     } catch (erro) {
-      console.error(
-        "[PESQUISA PNCP]",
-        erro
-      );
+      /*
+       * Os lotes anteriores já foram
+       * persistidos no Railway.
+       */
+      router.refresh();
 
       setResultado({
         sucesso: false,
 
         erro:
           erro instanceof Error
-            ? erro.message
+            ? totalPaginas >
+              0
+              ? `${erro.message} As ${totalPaginas} páginas processadas anteriormente já foram salvas.`
+              : erro.message
             : "Não foi possível concluir a pesquisa.",
       });
     } finally {
@@ -337,9 +511,11 @@ export default function BotaoPesquisa() {
         onClick={() => {
           setResultado(null);
 
+          setProgresso(null);
+
           setAberto(true);
         }}
-        className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+        className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700"
       >
         <svg
           viewBox="0 0 24 24"
@@ -360,9 +536,7 @@ export default function BotaoPesquisa() {
 
       {aberto && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-[1px]">
-          <div className="w-full max-w-xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
-            {/* CABEÇALHO */}
-
+          <div className="max-h-[95vh] w-full max-w-xl overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-2xl">
             <div className="flex items-start justify-between border-b border-slate-200 px-6 py-5">
               <div>
                 <h2 className="text-xl font-bold text-slate-950">
@@ -370,7 +544,8 @@ export default function BotaoPesquisa() {
                 </h2>
 
                 <p className="mt-1 text-sm font-medium text-slate-600">
-                  Consulte o PNCP e salve as oportunidades encontradas.
+                  Consulte o PNCP e salve as
+                  oportunidades encontradas.
                 </p>
               </div>
 
@@ -384,7 +559,7 @@ export default function BotaoPesquisa() {
                     false
                   )
                 }
-                className="rounded-lg px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-lg px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-50"
               >
                 Fechar
               </button>
@@ -396,8 +571,6 @@ export default function BotaoPesquisa() {
               }
               className="space-y-5 px-6 py-5"
             >
-              {/* TERMO */}
-
               <div>
                 <label className="mb-2 block text-sm font-semibold text-slate-800">
                   Termo de busca
@@ -421,17 +594,15 @@ export default function BotaoPesquisa() {
                     )
                   }
                   placeholder="Ex.: médico"
-                  className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:opacity-70"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50"
                 />
 
-                <p className="mt-2 text-xs font-medium leading-5 text-slate-500">
+                <p className="mt-2 text-xs font-medium text-slate-500">
                   A pesquisa considera objeto,
                   informações complementares e
                   órgão.
                 </p>
               </div>
-
-              {/* UF E MODALIDADE */}
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
@@ -455,7 +626,7 @@ export default function BotaoPesquisa() {
                           .value
                       )
                     }
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:opacity-70"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm"
                   >
                     <option value="">
                       Todas
@@ -531,7 +702,7 @@ export default function BotaoPesquisa() {
                           .value
                       )
                     }
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:opacity-70"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm"
                   >
                     <option value="6">
                       Pregão eletrônico
@@ -539,8 +710,6 @@ export default function BotaoPesquisa() {
                   </select>
                 </div>
               </div>
-
-              {/* ENCERRAMENTO */}
 
               <div>
                 <p className="mb-3 text-sm font-semibold text-slate-800">
@@ -570,7 +739,7 @@ export default function BotaoPesquisa() {
                             .value
                         )
                       }
-                      className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:opacity-70"
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm"
                     />
                   </div>
 
@@ -596,32 +765,75 @@ export default function BotaoPesquisa() {
                             .value
                         )
                       }
-                      className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:opacity-70"
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm"
                     />
                   </div>
                 </div>
               </div>
 
-              {/* PESQUISANDO */}
+              {pesquisando &&
+                progresso && (
+                  <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+                    <div className="flex items-center gap-3">
+                      <div className="h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-blue-200 border-t-blue-600" />
 
-              {pesquisando && (
-                <div className="flex items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4">
-                  <div className="h-5 w-5 animate-spin rounded-full border-2 border-blue-200 border-t-blue-600" />
+                      <div>
+                        <p className="text-sm font-bold text-blue-900">
+                          Pesquisando no PNCP...
+                        </p>
 
-                  <div>
-                    <p className="text-sm font-semibold text-blue-900">
-                      Consultando o PNCP...
-                    </p>
+                        <p className="mt-1 text-xs font-medium text-blue-700">
+                          Os resultados são salvos
+                          lote a lote.
+                        </p>
+                      </div>
+                    </div>
 
-                    <p className="mt-0.5 text-xs font-medium text-blue-700">
-                      Isso pode levar alguns
-                      segundos.
-                    </p>
+                    <div className="mt-4 grid grid-cols-2 gap-3 text-sm font-medium text-blue-800">
+                      <p>
+                        Páginas:{" "}
+                        <strong>
+                          {
+                            progresso.paginas
+                          }
+                          {progresso.totalPaginasPNCP
+                            ? ` / ${Math.min(
+                                progresso.totalPaginasPNCP,
+                                200
+                              )}`
+                            : ""}
+                        </strong>
+                      </p>
+
+                      <p>
+                        Página atual:{" "}
+                        <strong>
+                          {
+                            progresso.paginaAtual
+                          }
+                        </strong>
+                      </p>
+
+                      <p>
+                        Encontradas:{" "}
+                        <strong>
+                          {
+                            progresso.encontradas
+                          }
+                        </strong>
+                      </p>
+
+                      <p>
+                        Salvas:{" "}
+                        <strong>
+                          {
+                            progresso.salvas
+                          }
+                        </strong>
+                      </p>
+                    </div>
                   </div>
-                </div>
-              )}
-
-              {/* RESULTADO */}
+                )}
 
               {resultado &&
                 !pesquisando && (
@@ -679,21 +891,18 @@ export default function BotaoPesquisa() {
                         </div>
 
                         {resultado
-                          .limitePaginasAtingido && (
-                          <p className="mt-3 border-t border-emerald-200 pt-3 text-xs font-medium leading-5 text-emerald-800">
-                            A consulta atingiu o
-                            limite técnico desta
-                            pesquisa. Podem existir
-                            outras oportunidades no
-                            PNCP.
+                          .limiteTotalAtingido && (
+                          <p className="mt-3 border-t border-emerald-200 pt-3 text-xs font-medium text-emerald-800">
+                            A pesquisa atingiu o
+                            limite técnico de 200
+                            páginas.
                           </p>
                         )}
                       </>
                     ) : (
                       <>
                         <p className="text-sm font-bold text-red-900">
-                          Não foi possível realizar
-                          a pesquisa.
+                          Pesquisa interrompida.
                         </p>
 
                         <p className="mt-2 text-sm font-medium leading-6 text-red-800">
@@ -706,8 +915,6 @@ export default function BotaoPesquisa() {
                   </div>
                 )}
 
-              {/* BOTÕES */}
-
               <div className="flex justify-end gap-3 border-t border-slate-200 pt-5">
                 <button
                   type="button"
@@ -719,7 +926,7 @@ export default function BotaoPesquisa() {
                       false
                     )
                   }
-                  className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm disabled:opacity-50"
                 >
                   Cancelar
                 </button>
@@ -729,7 +936,7 @@ export default function BotaoPesquisa() {
                   disabled={
                     pesquisando
                   }
-                  className="inline-flex min-w-[155px] items-center justify-center rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="inline-flex min-w-[155px] items-center justify-center rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {pesquisando
                     ? "Pesquisando..."

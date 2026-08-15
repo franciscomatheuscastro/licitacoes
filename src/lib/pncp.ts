@@ -11,32 +11,25 @@ const PNCP_URL =
 const TAMANHO_PAGINA = 50;
 
 /*
- * IMPORTANTE:
- *
- * Esta pesquisa acontece dentro de uma Route Handler da Vercel.
- * Não podemos percorrer 200 páginas em uma única requisição.
- *
- * 8 páginas x 50 registros = até 400 registros brutos.
- *
- * Depois podemos evoluir para uma busca em lotes/background
- * para percorrer todas as páginas sem limite de execução HTTP.
+ * Quantidade de páginas processadas
+ * em CADA chamada da Vercel.
  */
-const LIMITE_PAGINAS = 200;
+export const PAGINAS_POR_LOTE = 8;
 
 /*
- * Intervalo entre páginas para reduzir risco de HTTP 429.
+ * Limite total da pesquisa manual.
+ *
+ * 200 x 50 = até 10.000 registros brutos.
+ */
+export const LIMITE_TOTAL_PAGINAS = 200;
+
+/*
+ * Intervalo entre chamadas ao PNCP.
  */
 const INTERVALO_ENTRE_PAGINAS_MS = 2000;
 
-/*
- * Mantemos poucas tentativas para não estourar
- * o tempo total da função em produção.
- */
 const MAX_TENTATIVAS = 2;
 
-/*
- * Timeout individual da chamada ao PNCP.
- */
 const TIMEOUT_PNCP_MS = 12000;
 
 export interface LicitacaoPNCP {
@@ -83,6 +76,12 @@ interface RespostaPNCP {
   totalPages?: number;
 }
 
+/*
+ * =====================================================
+ * FILTROS
+ * =====================================================
+ */
+
 export interface FiltrosPesquisaRadar {
   termo?: string;
 
@@ -94,14 +93,29 @@ export interface FiltrosPesquisaRadar {
   encerramentoFim?: string;
 }
 
+/*
+ * =====================================================
+ * RESULTADO DE UM LOTE
+ * =====================================================
+ */
+
 export interface ResultadoPesquisaRadar {
   itens: LicitacaoPNCP[];
+
+  paginaInicial: number;
+  paginaFinal: number;
 
   paginasProcessadas: number;
 
   quantidadeRecebida: number;
 
-  limitePaginasAtingido: boolean;
+  proximaPagina: number | null;
+
+  concluida: boolean;
+
+  totalPaginasPNCP: number | null;
+
+  limiteTotalAtingido: boolean;
 }
 
 /*
@@ -153,8 +167,7 @@ function dataHojeBrasil() {
     );
 
   const valores:
-    Record<string, string> =
-    {};
+    Record<string, string> = {};
 
   for (const parte of partes) {
     if (
@@ -178,9 +191,6 @@ function formatarDataPNCP(
   );
 }
 
-/*
- * Próximo dia útil.
- */
 export function calcularProximoDiaUtil() {
   const hojeTexto =
     dataHojeBrasil();
@@ -364,7 +374,7 @@ function mensagemErroPNCP(
   ) {
     return (
       "O PNCP está temporariamente indisponível ou instável. " +
-      "Tente realizar a pesquisa novamente em alguns instantes."
+      "Tente novamente em alguns instantes."
     );
   }
 
@@ -373,7 +383,7 @@ function mensagemErroPNCP(
 
 /*
  * =====================================================
- * CONSULTA PNCP
+ * CONSULTA DE UMA PÁGINA
  * =====================================================
  */
 
@@ -480,9 +490,6 @@ async function consultarPaginaPNCP({
           }
         );
 
-      /*
-       * SUCESSO
-       */
       if (resposta.ok) {
         try {
           return (
@@ -495,9 +502,6 @@ async function consultarPaginaPNCP({
         }
       }
 
-      /*
-       * FALHAS TEMPORÁRIAS
-       */
       if (
         erroTemporario(
           resposta.status
@@ -531,9 +535,6 @@ async function consultarPaginaPNCP({
         throw ultimoErro;
       }
 
-      /*
-       * OUTROS ERROS HTTP
-       */
       const corpo =
         await resposta
           .text()
@@ -553,8 +554,19 @@ async function consultarPaginaPNCP({
       );
     } catch (erro) {
       if (
+        signal?.aborted
+      ) {
+        throw new Error(
+          "Consulta ao PNCP cancelada."
+        );
+      }
+
+      if (
         erro instanceof Error
       ) {
+        /*
+         * Erro HTTP deliberadamente lançado.
+         */
         if (
           erro.message.startsWith(
             "PNCP erro"
@@ -578,12 +590,6 @@ async function consultarPaginaPNCP({
           new Error(
             "Erro desconhecido ao consultar o PNCP."
           );
-      }
-
-      if (signal?.aborted) {
-        throw new Error(
-          "Consulta ao PNCP cancelada."
-        );
       }
 
       if (
@@ -627,7 +633,7 @@ async function consultarPaginaPNCP({
 
 /*
  * =====================================================
- * FILTROS
+ * FILTRO LOCAL
  * =====================================================
  */
 
@@ -725,8 +731,7 @@ function itemAtendeFiltros(
   }
 
   /*
-   * Regra mantida do fluxo n8n:
-   * somente oportunidades com valor.
+   * Mesma regra do fluxo n8n.
    */
   const valor =
     Number(
@@ -736,9 +741,7 @@ function itemAtendeFiltros(
     );
 
   if (
-    !Number.isFinite(
-      valor
-    ) ||
+    !Number.isFinite(valor) ||
     valor <= 0
   ) {
     return false;
@@ -756,8 +759,7 @@ function itemAtendeFiltros(
 
   const situacao =
     normalizarTexto(
-      item
-        .situacaoCompraNome
+      item.situacaoCompraNome
     );
 
   if (
@@ -779,19 +781,50 @@ function itemAtendeFiltros(
 
 /*
  * =====================================================
- * RADAR MANUAL
+ * BUSCA EM LOTE
  * =====================================================
  */
 
 export async function buscarLicitacoesRadar(
-  filtros: FiltrosPesquisaRadar
+  filtros: FiltrosPesquisaRadar,
+  paginaInicial = 1,
+  paginasPorLote =
+    PAGINAS_POR_LOTE
 ): Promise<ResultadoPesquisaRadar> {
   const dataFinal =
     filtros
       .encerramentoFim ||
     calcularProximoDiaUtil();
 
-  let pagina = 1;
+  const inicio =
+    Math.max(
+      1,
+      Math.floor(
+        paginaInicial
+      )
+    );
+
+  const quantidadeLote =
+    Math.max(
+      1,
+      Math.min(
+        PAGINAS_POR_LOTE,
+        Math.floor(
+          paginasPorLote
+        )
+      )
+    );
+
+  const ultimaPaginaDoLote =
+    Math.min(
+      LIMITE_TOTAL_PAGINAS,
+      inicio +
+        quantidadeLote -
+        1
+    );
+
+  let pagina =
+    inicio;
 
   let paginasProcessadas =
     0;
@@ -799,7 +832,16 @@ export async function buscarLicitacoesRadar(
   let quantidadeRecebida =
     0;
 
-  let limitePaginasAtingido =
+  let paginaFinal =
+    inicio - 1;
+
+  let concluida =
+    false;
+
+  let totalPaginasPNCP:
+    number | null = null;
+
+  let limiteTotalAtingido =
     false;
 
   const mapa =
@@ -810,7 +852,7 @@ export async function buscarLicitacoesRadar(
 
   while (
     pagina <=
-    LIMITE_PAGINAS
+    ultimaPaginaDoLote
   ) {
     const dados =
       await consultarPaginaPNCP({
@@ -828,6 +870,9 @@ export async function buscarLicitacoesRadar(
       });
 
     paginasProcessadas++;
+
+    paginaFinal =
+      pagina;
 
     const itens =
       Array.isArray(
@@ -870,7 +915,7 @@ export async function buscarLicitacoesRadar(
       }
     }
 
-    const totalPaginas =
+    const total =
       Number(
         dados.totalPaginas ??
           dados.totalDePaginas ??
@@ -878,10 +923,15 @@ export async function buscarLicitacoesRadar(
           0
       ) || 0;
 
+    if (total > 0) {
+      totalPaginasPNCP =
+        total;
+    }
+
     const terminouPeloTotal =
-      totalPaginas > 0 &&
+      total > 0 &&
       pagina >=
-        totalPaginas;
+        total;
 
     const terminouPelaQuantidade =
       itens.length <
@@ -891,20 +941,33 @@ export async function buscarLicitacoesRadar(
       terminouPeloTotal ||
       terminouPelaQuantidade
     ) {
+      concluida = true;
+
+      break;
+    }
+
+    if (
+      pagina >=
+      LIMITE_TOTAL_PAGINAS
+    ) {
+      concluida = true;
+      limiteTotalAtingido =
+        true;
+
       break;
     }
 
     /*
-     * Sabemos que existem mais páginas,
-     * mas atingimos nosso limite técnico.
+     * Última página deste lote.
+     *
+     * Não aguardamos aqui porque a
+     * próxima página ficará para a
+     * próxima requisição HTTP.
      */
     if (
       pagina >=
-      LIMITE_PAGINAS
+      ultimaPaginaDoLote
     ) {
-      limitePaginasAtingido =
-        true;
-
       break;
     }
 
@@ -915,16 +978,47 @@ export async function buscarLicitacoesRadar(
     );
   }
 
+  let proximaPagina:
+    number | null = null;
+
+  if (!concluida) {
+    const candidata =
+      paginaFinal + 1;
+
+    if (
+      candidata >
+      LIMITE_TOTAL_PAGINAS
+    ) {
+      concluida = true;
+      limiteTotalAtingido =
+        true;
+    } else {
+      proximaPagina =
+        candidata;
+    }
+  }
+
   return {
     itens: [
       ...mapa.values(),
     ],
 
+    paginaInicial:
+      inicio,
+
+    paginaFinal,
+
     paginasProcessadas,
 
     quantidadeRecebida,
 
-    limitePaginasAtingido,
+    proximaPagina,
+
+    concluida,
+
+    totalPaginasPNCP,
+
+    limiteTotalAtingido,
   };
 }
 
@@ -932,8 +1026,10 @@ export async function buscarLicitacoesRadar(
  * =====================================================
  * PESQUISA ANTIGA
  * =====================================================
+ *
+ * Mantida porque GET /api/licitacoes
+ * continua utilizando searchPncp().
  */
-
 export async function searchPncp(
   params: SearchParams,
   signal?: AbortSignal
@@ -1014,12 +1110,8 @@ export async function searchPncp(
                   .unidadeOrgao
                   ?.municipioNome,
               ]
-                .filter(
-                  Boolean
-                )
-                .join(
-                  " "
-                )
+                .filter(Boolean)
+                .join(" ")
             );
 
           if (

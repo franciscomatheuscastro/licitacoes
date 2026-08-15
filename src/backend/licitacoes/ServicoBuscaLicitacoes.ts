@@ -2,6 +2,7 @@
 
 import {
   buscarLicitacoesRadar,
+  PAGINAS_POR_LOTE,
   type FiltrosPesquisaRadar,
 } from "@/lib/pncp";
 
@@ -9,14 +10,18 @@ import RepositorioLicitacao from "./RepositorioLicitacao";
 
 export default class ServicoBuscaLicitacoes {
   static async executar(
-    filtros: FiltrosPesquisaRadar
+    filtros: FiltrosPesquisaRadar,
+    paginaInicial = 1
   ) {
     const resultadoPNCP =
       await buscarLicitacoesRadar(
-        filtros
+        filtros,
+        paginaInicial,
+        PAGINAS_POR_LOTE
       );
 
     let salvas = 0;
+
     let erros = 0;
 
     const errosDetalhados:
@@ -39,14 +44,14 @@ export default class ServicoBuscaLicitacoes {
         const mensagem =
           erro instanceof Error
             ? erro.message
-            : "Erro desconhecido";
+            : "Erro desconhecido.";
 
         errosDetalhados.push(
           mensagem
         );
 
         console.error(
-          "[LICITAÇÃO] Erro ao salvar:",
+          "[RADAR] Erro ao salvar licitação:",
           erro
         );
       }
@@ -61,6 +66,8 @@ export default class ServicoBuscaLicitacoes {
 
       erros,
 
+      errosDetalhados,
+
       paginasProcessadas:
         resultadoPNCP
           .paginasProcessadas,
@@ -69,7 +76,29 @@ export default class ServicoBuscaLicitacoes {
         resultadoPNCP
           .quantidadeRecebida,
 
-      errosDetalhados,
+      paginaInicial:
+        resultadoPNCP
+          .paginaInicial,
+
+      paginaFinal:
+        resultadoPNCP
+          .paginaFinal,
+
+      proximaPagina:
+        resultadoPNCP
+          .proximaPagina,
+
+      concluida:
+        resultadoPNCP
+          .concluida,
+
+      totalPaginasPNCP:
+        resultadoPNCP
+          .totalPaginasPNCP,
+
+      limiteTotalAtingido:
+        resultadoPNCP
+          .limiteTotalAtingido,
     };
   }
 }
