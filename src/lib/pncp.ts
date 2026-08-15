@@ -21,7 +21,7 @@ const TAMANHO_PAGINA = 50;
  * Depois podemos evoluir para uma busca em lotes/background
  * para percorrer todas as páginas sem limite de execução HTTP.
  */
-const LIMITE_PAGINAS = 8;
+const LIMITE_PAGINAS = 200;
 
 /*
  * Intervalo entre páginas para reduzir risco de HTTP 429.
