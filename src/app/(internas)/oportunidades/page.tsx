@@ -5,12 +5,24 @@ import RepositorioLicitacao from "@/backend/licitacoes/RepositorioLicitacao";
 import BotaoPesquisa from "./BotaoPesquisa";
 import StatusOportunidade from "./StatusOportunidade";
 
-export const dynamic = "force-dynamic";
+export const dynamic =
+  "force-dynamic";
 
 type SearchParams = Promise<{
   encIni?: string;
   encFim?: string;
+  status?: string;
 }>;
+
+const STATUS_VALIDOS = [
+  "NOVA",
+  "EM_ANALISE",
+  "INTERESSANTE",
+  "PARTICIPANDO",
+  "GANHA",
+  "PERDIDA",
+  "DESCARTADA",
+];
 
 /*
  * =====================================================
@@ -40,9 +52,7 @@ function formatarMoeda(
     );
 
   if (
-    !Number.isFinite(
-      numero
-    )
+    !Number.isFinite(numero)
   ) {
     return "Não informado";
   }
@@ -75,10 +85,6 @@ function formatarData(
   );
 }
 
-/*
- * Converte Date para YYYY-MM-DD
- * considerando o horário de Brasília.
- */
 function obterDataLocal(
   valor: Date | null
 ) {
@@ -102,10 +108,8 @@ function obterDataLocal(
     );
 
   const dados:
-    Record<
-      string,
-      string
-    > = {};
+    Record<string, string> =
+    {};
 
   for (
     const parte of partes
@@ -142,9 +146,6 @@ function labelStatus(
     case "INTERESSANTE":
       return "Interessante";
 
-    case "DESCARTADA":
-      return "Descartada";
-
     case "PARTICIPANDO":
       return "Participando";
 
@@ -153,6 +154,9 @@ function labelStatus(
 
     case "PERDIDA":
       return "Perdida";
+
+    case "DESCARTADA":
+      return "Descartada";
 
     default:
       return status;
@@ -241,9 +245,17 @@ export default async function OportunidadesPage({
       ? parametros.encFim
       : "";
 
+  const statusSelecionado =
+    typeof parametros.status ===
+      "string" &&
+    STATUS_VALIDOS.includes(
+      parametros.status
+    )
+      ? parametros.status
+      : "";
+
   /*
-   * Todas as oportunidades já
-   * armazenadas no Railway.
+   * Todas as oportunidades do banco.
    */
   const todasLicitacoes =
     await RepositorioLicitacao
@@ -251,15 +263,14 @@ export default async function OportunidadesPage({
 
   /*
    * ===================================================
-   * FILTRO DE ENCERRAMENTO
+   * PRIMEIRO: FILTRO DE DATA
    * ===================================================
    *
-   * Este filtro NÃO chama o PNCP.
-   *
-   * Ele apenas filtra os registros
-   * já armazenados no banco.
+   * Os indicadores serão calculados em cima
+   * deste conjunto.
    */
-  const licitacoes =
+
+  const licitacoesNoPeriodo =
     todasLicitacoes.filter(
       (item) => {
         if (
@@ -303,32 +314,38 @@ export default async function OportunidadesPage({
    * INDICADORES
    * ===================================================
    *
-   * Eles acompanham o período filtrado.
+   * Importante:
+   * eles respeitam o período,
+   * mas NÃO o filtro de status.
+   *
+   * Assim, mesmo estando em "Em análise",
+   * você continua vendo quantas existem
+   * nas outras categorias.
    */
 
   const novas =
-    licitacoes.filter(
+    licitacoesNoPeriodo.filter(
       (item) =>
         item.status ===
         "NOVA"
     ).length;
 
   const emAnalise =
-    licitacoes.filter(
+    licitacoesNoPeriodo.filter(
       (item) =>
         item.status ===
         "EM_ANALISE"
     ).length;
 
   const participando =
-    licitacoes.filter(
+    licitacoesNoPeriodo.filter(
       (item) =>
         item.status ===
         "PARTICIPANDO"
     ).length;
 
   const valorPotencial =
-    licitacoes
+    licitacoesNoPeriodo
       .filter(
         (item) =>
           item.status !==
@@ -354,10 +371,78 @@ export default async function OportunidadesPage({
         0
       );
 
-  const possuiFiltro =
+  /*
+   * ===================================================
+   * SEGUNDO: FILTRO DE STATUS
+   * ===================================================
+   */
+
+  const licitacoes =
+    statusSelecionado
+      ? licitacoesNoPeriodo.filter(
+          (item) =>
+            item.status ===
+            statusSelecionado
+        )
+      : licitacoesNoPeriodo;
+
+  /*
+   * ===================================================
+   * LINKS DE STATUS
+   * ===================================================
+   *
+   * Preservam as datas selecionadas.
+   */
+
+  function hrefStatus(
+    status?: string
+  ) {
+    const query =
+      new URLSearchParams();
+
+    if (
+      encerramentoInicio
+    ) {
+      query.set(
+        "encIni",
+        encerramentoInicio
+      );
+    }
+
+    if (
+      encerramentoFim
+    ) {
+      query.set(
+        "encFim",
+        encerramentoFim
+      );
+    }
+
+    if (status) {
+      query.set(
+        "status",
+        status
+      );
+    }
+
+    const texto =
+      query.toString();
+
+    return texto
+      ? `/oportunidades?${texto}`
+      : "/oportunidades";
+  }
+
+  const possuiFiltroData =
     Boolean(
       encerramentoInicio ||
         encerramentoFim
+    );
+
+  const possuiFiltro =
+    Boolean(
+      possuiFiltroData ||
+        statusSelecionado
     );
 
   return (
@@ -368,7 +453,7 @@ export default async function OportunidadesPage({
         <section className="mb-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+              <div className="mb-2 inline-flex rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
                 Radar de Licitações
               </div>
 
@@ -385,23 +470,29 @@ export default async function OportunidadesPage({
               </p>
             </div>
 
-            <div className="shrink-0">
-              <BotaoPesquisa />
-            </div>
+            <BotaoPesquisa />
           </div>
         </section>
 
-        {/* INDICADORES */}
+        {/* INDICADORES CLICÁVEIS */}
 
         <section className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <Resumo
             titulo="Novas"
             valor={
-              String(
-                novas
-              )
+              String(novas)
             }
             subtitulo="Aguardando análise"
+            href={
+              hrefStatus(
+                "NOVA"
+              )
+            }
+            ativo={
+              statusSelecionado ===
+              "NOVA"
+            }
+            cor="blue"
           />
 
           <Resumo
@@ -412,6 +503,16 @@ export default async function OportunidadesPage({
               )
             }
             subtitulo="Em avaliação"
+            href={
+              hrefStatus(
+                "EM_ANALISE"
+              )
+            }
+            ativo={
+              statusSelecionado ===
+              "EM_ANALISE"
+            }
+            cor="amber"
           />
 
           <Resumo
@@ -422,6 +523,16 @@ export default async function OportunidadesPage({
               )
             }
             subtitulo="Processos ativos"
+            href={
+              hrefStatus(
+                "PARTICIPANDO"
+              )
+            }
+            ativo={
+              statusSelecionado ===
+              "PARTICIPANDO"
+            }
+            cor="cyan"
           />
 
           <Resumo
@@ -452,17 +563,99 @@ export default async function OportunidadesPage({
             </h2>
 
             <p className="mt-1 text-sm text-slate-500">
-              Filtre as oportunidades já
-              encontradas pela data de
-              encerramento das propostas.
+              Filtre por status e pela data
+              de encerramento das propostas.
             </p>
           </div>
+
+          {/* FILTROS RÁPIDOS DE STATUS */}
+
+          <div className="mb-5 flex flex-wrap gap-2">
+            <Link
+              href={
+                hrefStatus()
+              }
+              className={
+                !statusSelecionado
+                  ? "rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
+                  : "rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+              }
+            >
+              Todas (
+              {
+                licitacoesNoPeriodo.length
+              }
+              )
+            </Link>
+
+            <Link
+              href={
+                hrefStatus(
+                  "NOVA"
+                )
+              }
+              className={
+                statusSelecionado ===
+                "NOVA"
+                  ? "rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white"
+                  : "rounded-full border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
+              }
+            >
+              Novas ({novas})
+            </Link>
+
+            <Link
+              href={
+                hrefStatus(
+                  "EM_ANALISE"
+                )
+              }
+              className={
+                statusSelecionado ===
+                "EM_ANALISE"
+                  ? "rounded-full bg-amber-500 px-4 py-2 text-sm font-semibold text-white"
+                  : "rounded-full border border-amber-200 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-700 transition hover:bg-amber-100"
+              }
+            >
+              Em análise (
+              {emAnalise})
+            </Link>
+
+            <Link
+              href={
+                hrefStatus(
+                  "PARTICIPANDO"
+                )
+              }
+              className={
+                statusSelecionado ===
+                "PARTICIPANDO"
+                  ? "rounded-full bg-cyan-600 px-4 py-2 text-sm font-semibold text-white"
+                  : "rounded-full border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 transition hover:bg-cyan-100"
+              }
+            >
+              Participando (
+              {participando})
+            </Link>
+          </div>
+
+          {/* FILTRO DE DATA */}
 
           <form
             method="GET"
             action="/oportunidades"
             className="flex flex-col gap-4 lg:flex-row lg:items-end"
           >
+            {statusSelecionado && (
+              <input
+                type="hidden"
+                name="status"
+                value={
+                  statusSelecionado
+                }
+              />
+            )}
+
             <div className="w-full lg:max-w-[220px]">
               <label
                 htmlFor="encIni"
@@ -514,45 +707,58 @@ export default async function OportunidadesPage({
                   href="/oportunidades"
                   className="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
                 >
-                  Limpar
+                  Limpar tudo
                 </Link>
               )}
             </div>
           </form>
         </section>
 
-        {/* OPORTUNIDADES */}
+        {/* LISTA */}
 
         <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-          <div className="flex flex-col gap-2 border-b border-slate-100 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-col gap-3 border-b border-slate-100 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <h2 className="text-base font-semibold text-slate-900">
-                Oportunidades encontradas
+                {statusSelecionado
+                  ? labelStatus(
+                      statusSelecionado
+                    )
+                  : "Oportunidades encontradas"}
               </h2>
 
               <p className="mt-1 text-sm text-slate-500">
                 {licitacoes.length ===
                 0
-                  ? possuiFiltro
-                    ? "Nenhuma oportunidade encontrada neste período."
-                    : "Nenhuma oportunidade armazenada."
+                  ? "Nenhuma oportunidade encontrada com os filtros selecionados."
                   : `${licitacoes.length} ${
                       licitacoes.length ===
                       1
-                        ? "oportunidade"
-                        : "oportunidades"
-                    } exibida${
-                      licitacoes.length ===
-                      1
-                        ? ""
-                        : "s"
+                        ? "oportunidade exibida"
+                        : "oportunidades exibidas"
                     }.`}
               </p>
             </div>
 
             {possuiFiltro && (
-              <div className="rounded-full bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700">
-                Filtro ativo
+              <div className="flex flex-wrap gap-2">
+                {statusSelecionado && (
+                  <span
+                    className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${classeStatus(
+                      statusSelecionado
+                    )}`}
+                  >
+                    {labelStatus(
+                      statusSelecionado
+                    )}
+                  </span>
+                )}
+
+                {possuiFiltroData && (
+                  <span className="rounded-full bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700">
+                    Período filtrado
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -578,8 +784,6 @@ export default async function OportunidadesPage({
                   >
                     <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
                       <div className="min-w-0 flex-1">
-                        {/* TAGS */}
-
                         <div className="mb-3 flex flex-wrap items-center gap-2">
                           <span
                             className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${classeStatus(
@@ -609,15 +813,11 @@ export default async function OportunidadesPage({
                           )}
                         </div>
 
-                        {/* TÍTULO */}
-
                         <h3 className="max-w-4xl text-base font-semibold leading-6 text-slate-900 sm:text-lg">
                           {
                             licitacao.titulo
                           }
                         </h3>
-
-                        {/* INFORMAÇÕES */}
 
                         <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
                           <Informacao
@@ -665,8 +865,6 @@ export default async function OportunidadesPage({
                         </div>
                       </div>
 
-                      {/* AÇÕES */}
-
                       <div className="flex shrink-0 flex-wrap items-center gap-2">
                         <StatusOportunidade
                           id={
@@ -704,7 +902,7 @@ export default async function OportunidadesPage({
 
 /*
  * =====================================================
- * CARD DE INDICADOR
+ * INDICADOR
  * =====================================================
  */
 
@@ -712,13 +910,43 @@ function Resumo({
   titulo,
   valor,
   subtitulo,
+  href,
+  ativo = false,
+  cor = "slate",
 }: {
   titulo: string;
   valor: string;
   subtitulo: string;
+
+  href?: string;
+
+  ativo?: boolean;
+
+  cor?:
+    | "slate"
+    | "blue"
+    | "amber"
+    | "cyan";
 }) {
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+  const classeAtivo =
+    ativo
+      ? cor === "blue"
+        ? "border-blue-400 ring-2 ring-blue-100"
+        : cor === "amber"
+          ? "border-amber-400 ring-2 ring-amber-100"
+          : cor === "cyan"
+            ? "border-cyan-400 ring-2 ring-cyan-100"
+            : "border-slate-400 ring-2 ring-slate-100"
+      : "border-slate-200";
+
+  const conteudo = (
+    <div
+      className={`h-full rounded-2xl border bg-white p-5 shadow-sm transition ${classeAtivo} ${
+        href
+          ? "cursor-pointer hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md"
+          : ""
+      }`}
+    >
       <div className="flex items-start justify-between">
         <div>
           <p className="text-sm font-medium text-slate-600">
@@ -738,13 +966,20 @@ function Resumo({
       </div>
     </div>
   );
-}
 
-/*
- * =====================================================
- * INFORMAÇÃO
- * =====================================================
- */
+  if (!href) {
+    return conteudo;
+  }
+
+  return (
+    <Link
+      href={href}
+      className="block h-full"
+    >
+      {conteudo}
+    </Link>
+  );
+}
 
 function Informacao({
   titulo,
@@ -765,12 +1000,6 @@ function Informacao({
     </div>
   );
 }
-
-/*
- * =====================================================
- * EMPTY STATE
- * =====================================================
- */
 
 function EmptyState({
   filtrado,
@@ -798,27 +1027,23 @@ function EmptyState({
 
         <h3 className="mt-5 text-base font-semibold text-slate-900">
           {filtrado
-            ? "Nenhuma oportunidade neste período"
+            ? "Nenhuma oportunidade com estes filtros"
             : "Seu radar ainda está vazio"}
         </h3>
 
         <p className="mt-2 text-sm leading-6 text-slate-500">
           {filtrado
-            ? "Altere o intervalo de encerramento ou limpe o filtro para visualizar outras oportunidades."
-            : "Faça uma pesquisa no PNCP para localizar novas licitações. As oportunidades encontradas serão salvas automaticamente aqui."}
+            ? "Altere os filtros selecionados ou limpe todos para visualizar outras oportunidades."
+            : "Faça uma pesquisa no PNCP para localizar novas licitações."}
         </p>
 
-        {filtrado ? (
+        {filtrado && (
           <Link
             href="/oportunidades"
             className="mt-5 inline-flex rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
           >
-            Limpar filtro
+            Limpar filtros
           </Link>
-        ) : (
-          <div className="mt-5 inline-flex rounded-lg bg-slate-100 px-4 py-2 text-xs font-medium text-slate-600">
-            Use o botão “Fazer pesquisa” acima
-          </div>
         )}
       </div>
     </div>
