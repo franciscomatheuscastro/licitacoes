@@ -12,19 +12,20 @@ const TAMANHO_PAGINA = 50;
 
 /*
  * Quantidade de páginas processadas
- * em CADA chamada da Vercel.
+ * em cada chamada da Vercel.
  */
 export const PAGINAS_POR_LOTE = 8;
 
 /*
- * Limite total da pesquisa manual.
+ * Limite total da pesquisa.
  *
- * 200 x 50 = até 10.000 registros brutos.
+ * 200 páginas x 50 registros
+ * = até 10.000 registros brutos.
  */
 export const LIMITE_TOTAL_PAGINAS = 200;
 
 /*
- * Intervalo entre chamadas ao PNCP.
+ * Mesmo conceito do Wait usado no n8n.
  */
 const INTERVALO_ENTRE_PAGINAS_MS = 2000;
 
@@ -32,15 +33,23 @@ const MAX_TENTATIVAS = 2;
 
 const TIMEOUT_PNCP_MS = 12000;
 
+/*
+ * =====================================================
+ * TIPOS PNCP
+ * =====================================================
+ */
+
 export interface LicitacaoPNCP {
   numeroControlePNCP?: string;
 
   objetoCompra?: string;
+
   informacaoComplementar?: string;
 
   valorTotalEstimado?: number;
 
   dataPublicacaoPncp?: string;
+
   dataInclusao?: string;
 
   dataEncerramentoProposta?: string;
@@ -48,22 +57,28 @@ export interface LicitacaoPNCP {
   situacaoCompraNome?: string;
 
   modalidadeNome?: string;
+
   modalidadeId?: number;
 
   linkSistemaOrigem?: string;
+
   linkProcessoEletronico?: string;
 
   anoCompra?: number;
+
   sequencialCompra?: number;
 
   orgaoEntidade?: {
     cnpj?: string;
+
     razaoSocial?: string;
   };
 
   unidadeOrgao?: {
     nomeUnidade?: string;
+
     municipioNome?: string;
+
     ufSigla?: string;
   };
 }
@@ -72,7 +87,9 @@ interface RespostaPNCP {
   data?: LicitacaoPNCP[];
 
   totalPaginas?: number;
+
   totalDePaginas?: number;
+
   totalPages?: number;
 }
 
@@ -90,6 +107,7 @@ export interface FiltrosPesquisaRadar {
   codigoModalidadeContratacao?: string;
 
   encerramentoInicio?: string;
+
   encerramentoFim?: string;
 }
 
@@ -103,6 +121,7 @@ export interface ResultadoPesquisaRadar {
   itens: LicitacaoPNCP[];
 
   paginaInicial: number;
+
   paginaFinal: number;
 
   paginasProcessadas: number;
@@ -159,7 +178,9 @@ function dataHojeBrasil() {
           "America/Sao_Paulo",
 
         year: "numeric",
+
         month: "2-digit",
+
         day: "2-digit",
       }
     ).formatToParts(
@@ -167,11 +188,17 @@ function dataHojeBrasil() {
     );
 
   const valores:
-    Record<string, string> = {};
+    Record<
+      string,
+      string
+    > = {};
 
-  for (const parte of partes) {
+  for (
+    const parte of partes
+  ) {
     if (
-      parte.type !== "literal"
+      parte.type !==
+      "literal"
     ) {
       valores[
         parte.type
@@ -207,8 +234,11 @@ export function calcularProximoDiaUtil() {
     new Date(
       Date.UTC(
         ano,
+
         mes - 1,
+
         dia,
+
         12
       )
     );
@@ -240,7 +270,8 @@ export function calcularProximoDiaUtil() {
 
   const mesFinal =
     String(
-      data.getUTCMonth() + 1
+      data.getUTCMonth() +
+        1
     ).padStart(
       2,
       "0"
@@ -256,6 +287,12 @@ export function calcularProximoDiaUtil() {
 
   return `${anoFinal}-${mesFinal}-${diaFinal}`;
 }
+
+/*
+ * =====================================================
+ * IDENTIFICAÇÃO
+ * =====================================================
+ */
 
 export function criarIdentificadorPNCP(
   item: LicitacaoPNCP
@@ -288,6 +325,12 @@ export function criarIdentificadorPNCP(
   return `${cnpj}_${ano}_${sequencial}`;
 }
 
+/*
+ * =====================================================
+ * CONVERSÃO PARA O FORMATO ANTIGO DO SISTEMA
+ * =====================================================
+ */
+
 function converterParaLicitacao(
   item: LicitacaoPNCP
 ): Licitacao | null {
@@ -304,7 +347,8 @@ function converterParaLicitacao(
     id,
 
     titulo:
-      item.objetoCompra?.trim() ||
+      item.objetoCompra
+        ?.trim() ||
       "Objeto não informado",
 
     orgao:
@@ -360,7 +404,9 @@ function erroTemporario(
 function mensagemErroPNCP(
   status: number
 ) {
-  if (status === 429) {
+  if (
+    status === 429
+  ) {
     return (
       "O PNCP atingiu temporariamente o limite de consultas. " +
       "Aguarde alguns instantes e tente novamente."
@@ -389,9 +435,13 @@ function mensagemErroPNCP(
 
 async function consultarPaginaPNCP({
   dataFinal,
+
   modalidade,
+
   pagina,
+
   tamanhoPagina,
+
   signal,
 }: {
   dataFinal: string;
@@ -405,7 +455,9 @@ async function consultarPaginaPNCP({
   signal?: AbortSignal;
 }): Promise<RespostaPNCP> {
   const url =
-    new URL(PNCP_URL);
+    new URL(
+      PNCP_URL
+    );
 
   url.searchParams.set(
     "dataFinal",
@@ -423,12 +475,16 @@ async function consultarPaginaPNCP({
 
   url.searchParams.set(
     "pagina",
-    String(pagina)
+    String(
+      pagina
+    )
   );
 
   url.searchParams.set(
     "tamanhoPagina",
-    String(tamanhoPagina)
+    String(
+      tamanhoPagina
+    )
   );
 
   let ultimoErro:
@@ -440,7 +496,9 @@ async function consultarPaginaPNCP({
     MAX_TENTATIVAS;
     tentativa++
   ) {
-    if (signal?.aborted) {
+    if (
+      signal?.aborted
+    ) {
       throw new Error(
         "Consulta ao PNCP cancelada."
       );
@@ -490,7 +548,13 @@ async function consultarPaginaPNCP({
           }
         );
 
-      if (resposta.ok) {
+      /*
+       * SUCESSO
+       */
+
+      if (
+        resposta.ok
+      ) {
         try {
           return (
             await resposta.json()
@@ -501,6 +565,10 @@ async function consultarPaginaPNCP({
           );
         }
       }
+
+      /*
+       * ERROS TEMPORÁRIOS
+       */
 
       if (
         erroTemporario(
@@ -535,6 +603,10 @@ async function consultarPaginaPNCP({
         throw ultimoErro;
       }
 
+      /*
+       * OUTROS ERROS HTTP
+       */
+
       const corpo =
         await resposta
           .text()
@@ -564,9 +636,6 @@ async function consultarPaginaPNCP({
       if (
         erro instanceof Error
       ) {
-        /*
-         * Erro HTTP deliberadamente lançado.
-         */
         if (
           erro.message.startsWith(
             "PNCP erro"
@@ -584,7 +653,8 @@ async function consultarPaginaPNCP({
           throw erro;
         }
 
-        ultimoErro = erro;
+        ultimoErro =
+          erro;
       } else {
         ultimoErro =
           new Error(
@@ -633,7 +703,104 @@ async function consultarPaginaPNCP({
 
 /*
  * =====================================================
- * FILTRO LOCAL
+ * REGRA DE TEXTO DO RADAR
+ * =====================================================
+ *
+ * IMPORTANTE:
+ *
+ * Esta regra replica o comportamento do n8n.
+ *
+ * No fluxo antigo, quando buscamos "medico",
+ * aceitamos:
+ *
+ * medico
+ * medica
+ * medicos
+ * medicas
+ *
+ * O texto analisado é:
+ *
+ * objetoCompra
+ * informacaoComplementar
+ * razaoSocial
+ * nomeUnidade
+ *
+ * Não usamos municipioNome nesta regra porque
+ * o fluxo n8n também não utilizava município
+ * para identificar uma oportunidade médica.
+ */
+
+function itemAtendeTermoRadar(
+  item: LicitacaoPNCP,
+  termoInformado?: string
+) {
+  const termo =
+    normalizarTexto(
+      termoInformado
+    );
+
+  if (!termo) {
+    return true;
+  }
+
+  const texto =
+    normalizarTexto(
+      [
+        item.objetoCompra,
+
+        item
+          .informacaoComplementar,
+
+        item
+          .orgaoEntidade
+          ?.razaoSocial,
+
+        item
+          .unidadeOrgao
+          ?.nomeUnidade,
+      ]
+        .filter(Boolean)
+        .join(" ")
+    );
+
+  /*
+   * Regra idêntica à pesquisa
+   * médica do n8n.
+   */
+  if (
+    termo === "medico" ||
+    termo === "medica" ||
+    termo === "medicos" ||
+    termo === "medicas"
+  ) {
+    return (
+      texto.includes(
+        "medico"
+      ) ||
+      texto.includes(
+        "medica"
+      ) ||
+      texto.includes(
+        "medicos"
+      ) ||
+      texto.includes(
+        "medicas"
+      )
+    );
+  }
+
+  /*
+   * Outros termos continuam
+   * funcionando normalmente.
+   */
+  return texto.includes(
+    termo
+  );
+}
+
+/*
+ * =====================================================
+ * FILTRO LOCAL DO RADAR
  * =====================================================
  */
 
@@ -641,46 +808,26 @@ function itemAtendeFiltros(
   item: LicitacaoPNCP,
   filtros: FiltrosPesquisaRadar
 ) {
-  const termo =
-    normalizarTexto(
+  /*
+   * TERMO
+   */
+
+  if (
+    !itemAtendeTermoRadar(
+      item,
       filtros.termo
-    );
-
-  if (termo) {
-    const textoItem =
-      normalizarTexto(
-        [
-          item.objetoCompra,
-
-          item
-            .informacaoComplementar,
-
-          item
-            .orgaoEntidade
-            ?.razaoSocial,
-
-          item
-            .unidadeOrgao
-            ?.nomeUnidade,
-
-          item
-            .unidadeOrgao
-            ?.municipioNome,
-        ]
-          .filter(Boolean)
-          .join(" ")
-      );
-
-    if (
-      !textoItem.includes(
-        termo
-      )
-    ) {
-      return false;
-    }
+    )
+  ) {
+    return false;
   }
 
-  if (filtros.uf) {
+  /*
+   * UF
+   */
+
+  if (
+    filtros.uf
+  ) {
     const ufItem =
       item.unidadeOrgao
         ?.ufSigla
@@ -688,11 +835,16 @@ function itemAtendeFiltros(
 
     if (
       ufItem !==
-      filtros.uf.toUpperCase()
+      filtros.uf
+        .toUpperCase()
     ) {
       return false;
     }
   }
+
+  /*
+   * ENCERRAMENTO
+   */
 
   const encerramento =
     item
@@ -731,8 +883,12 @@ function itemAtendeFiltros(
   }
 
   /*
-   * Mesma regra do fluxo n8n.
+   * VALOR ESTIMADO
+   *
+   * Mesma regra do n8n:
+   * precisa ser maior que zero.
    */
+
   const valor =
     Number(
       item
@@ -741,11 +897,17 @@ function itemAtendeFiltros(
     );
 
   if (
-    !Number.isFinite(valor) ||
+    !Number.isFinite(
+      valor
+    ) ||
     valor <= 0
   ) {
     return false;
   }
+
+  /*
+   * LINK
+   */
 
   const link =
     item
@@ -757,9 +919,14 @@ function itemAtendeFiltros(
     return false;
   }
 
+  /*
+   * SITUAÇÃO
+   */
+
   const situacao =
     normalizarTexto(
-      item.situacaoCompraNome
+      item
+        .situacaoCompraNome
     );
 
   if (
@@ -781,13 +948,15 @@ function itemAtendeFiltros(
 
 /*
  * =====================================================
- * BUSCA EM LOTE
+ * BUSCA EM LOTES
  * =====================================================
  */
 
 export async function buscarLicitacoesRadar(
   filtros: FiltrosPesquisaRadar,
+
   paginaInicial = 1,
+
   paginasPorLote =
     PAGINAS_POR_LOTE
 ): Promise<ResultadoPesquisaRadar> {
@@ -809,6 +978,7 @@ export async function buscarLicitacoesRadar(
       1,
       Math.min(
         PAGINAS_POR_LOTE,
+
         Math.floor(
           paginasPorLote
         )
@@ -818,6 +988,7 @@ export async function buscarLicitacoesRadar(
   const ultimaPaginaDoLote =
     Math.min(
       LIMITE_TOTAL_PAGINAS,
+
       inicio +
         quantidadeLote -
         1
@@ -843,6 +1014,15 @@ export async function buscarLicitacoesRadar(
 
   let limiteTotalAtingido =
     false;
+
+  /*
+   * Remove duplicidade dentro
+   * do lote atual.
+   *
+   * Entre lotes, o Prisma também
+   * protege pelo numeroControlePNCP
+   * com UPSERT.
+   */
 
   const mapa =
     new Map<
@@ -884,6 +1064,10 @@ export async function buscarLicitacoesRadar(
     quantidadeRecebida +=
       itens.length;
 
+    /*
+     * FILTRA OS ITENS
+     */
+
     for (
       const item of itens
     ) {
@@ -915,6 +1099,10 @@ export async function buscarLicitacoesRadar(
       }
     }
 
+    /*
+     * TOTAL DE PÁGINAS
+     */
+
     const total =
       Number(
         dados.totalPaginas ??
@@ -923,10 +1111,16 @@ export async function buscarLicitacoesRadar(
           0
       ) || 0;
 
-    if (total > 0) {
+    if (
+      total > 0
+    ) {
       totalPaginasPNCP =
         total;
     }
+
+    /*
+     * PNCP terminou naturalmente.
+     */
 
     const terminouPeloTotal =
       total > 0 &&
@@ -941,16 +1135,23 @@ export async function buscarLicitacoesRadar(
       terminouPeloTotal ||
       terminouPelaQuantidade
     ) {
-      concluida = true;
+      concluida =
+        true;
 
       break;
     }
+
+    /*
+     * LIMITE DE SEGURANÇA
+     */
 
     if (
       pagina >=
       LIMITE_TOTAL_PAGINAS
     ) {
-      concluida = true;
+      concluida =
+        true;
+
       limiteTotalAtingido =
         true;
 
@@ -958,12 +1159,9 @@ export async function buscarLicitacoesRadar(
     }
 
     /*
-     * Última página deste lote.
-     *
-     * Não aguardamos aqui porque a
-     * próxima página ficará para a
-     * próxima requisição HTTP.
+     * FIM DO LOTE
      */
+
     if (
       pagina >=
       ultimaPaginaDoLote
@@ -973,10 +1171,20 @@ export async function buscarLicitacoesRadar(
 
     pagina++;
 
+    /*
+     * Espera entre páginas.
+     */
+
     await aguardar(
       INTERVALO_ENTRE_PAGINAS_MS
     );
   }
+
+  /*
+   * ===================================================
+   * PRÓXIMO LOTE
+   * ===================================================
+   */
 
   let proximaPagina:
     number | null = null;
@@ -989,7 +1197,9 @@ export async function buscarLicitacoesRadar(
       candidata >
       LIMITE_TOTAL_PAGINAS
     ) {
-      concluida = true;
+      concluida =
+        true;
+
       limiteTotalAtingido =
         true;
     } else {
@@ -1027,18 +1237,23 @@ export async function buscarLicitacoesRadar(
  * PESQUISA ANTIGA
  * =====================================================
  *
- * Mantida porque GET /api/licitacoes
- * continua utilizando searchPncp().
+ * NÃO alterar a lógica dessa função por causa do Radar.
+ *
+ * GET /api/licitacoes continua utilizando searchPncp()
+ * e aqui mantemos a pesquisa genérica por termo.
  */
+
 export async function searchPncp(
   params: SearchParams,
+
   signal?: AbortSignal
 ): Promise<Licitacao[]> {
   const pagina =
     Math.max(
       1,
       Number(
-        params.page || 1
+        params.page ||
+          1
       )
     );
 
@@ -1089,6 +1304,10 @@ export async function searchPncp(
   let filtrados =
     itens.filter(
       (item) => {
+        /*
+         * Pesquisa textual genérica.
+         */
+
         if (termo) {
           const texto =
             normalizarTexto(
@@ -1110,8 +1329,12 @@ export async function searchPncp(
                   .unidadeOrgao
                   ?.municipioNome,
               ]
-                .filter(Boolean)
-                .join(" ")
+                .filter(
+                  Boolean
+                )
+                .join(
+                  " "
+                )
             );
 
           if (
@@ -1122,6 +1345,10 @@ export async function searchPncp(
             return false;
           }
         }
+
+        /*
+         * UF
+         */
 
         if (params.uf) {
           if (
@@ -1140,7 +1367,13 @@ export async function searchPncp(
       }
     );
 
-  if (params.dataIni) {
+  /*
+   * DATA INICIAL DE PUBLICAÇÃO
+   */
+
+  if (
+    params.dataIni
+  ) {
     filtrados =
       filtrados.filter(
         (item) => {
@@ -1164,7 +1397,13 @@ export async function searchPncp(
       );
   }
 
-  if (params.dataFim) {
+  /*
+   * DATA FINAL DE PUBLICAÇÃO
+   */
+
+  if (
+    params.dataFim
+  ) {
     filtrados =
       filtrados.filter(
         (item) => {
