@@ -5,8 +5,7 @@ import RepositorioLicitacao from "@/backend/licitacoes/RepositorioLicitacao";
 import BotaoPesquisa from "./BotaoPesquisa";
 import StatusOportunidade from "./StatusOportunidade";
 
-export const dynamic =
-  "force-dynamic";
+export const dynamic = "force-dynamic";
 
 type SearchParams = Promise<{
   encIni?: string;
@@ -47,13 +46,9 @@ function formatarMoeda(
   }
 
   const numero =
-    Number(
-      valor.toString()
-    );
+    Number(valor.toString());
 
-  if (
-    !Number.isFinite(numero)
-  ) {
+  if (!Number.isFinite(numero)) {
     return "Não informado";
   }
 
@@ -79,8 +74,11 @@ function formatarData(
       timeZone:
         "America/Sao_Paulo",
 
-      dateStyle: "short",
-      timeStyle: "short",
+      dateStyle:
+        "short",
+
+      timeStyle:
+        "short",
     }
   );
 }
@@ -103,13 +101,13 @@ function obterDataLocal(
         month: "2-digit",
         day: "2-digit",
       }
-    ).formatToParts(
-      valor
-    );
+    ).formatToParts(valor);
 
   const dados:
-    Record<string, string> =
-    {};
+    Record<
+      string,
+      string
+    > = {};
 
   for (
     const parte of partes
@@ -203,11 +201,17 @@ function classeStatus(
       );
 
     case "PERDIDA":
-    case "DESCARTADA":
       return (
         "border-red-100 " +
         "bg-red-50 " +
         "text-red-700"
+      );
+
+    case "DESCARTADA":
+      return (
+        "border-slate-200 " +
+        "bg-slate-100 " +
+        "text-slate-700"
       );
 
     default:
@@ -255,19 +259,18 @@ export default async function OportunidadesPage({
       : "";
 
   /*
-   * Todas as oportunidades do banco.
+   * ===================================================
+   * BANCO
+   * ===================================================
    */
+
   const todasLicitacoes =
-    await RepositorioLicitacao
-      .listar();
+    await RepositorioLicitacao.listar();
 
   /*
    * ===================================================
-   * PRIMEIRO: FILTRO DE DATA
+   * FILTRO DE DATA
    * ===================================================
-   *
-   * Os indicadores serão calculados em cima
-   * deste conjunto.
    */
 
   const licitacoesNoPeriodo =
@@ -311,23 +314,17 @@ export default async function OportunidadesPage({
 
   /*
    * ===================================================
-   * INDICADORES
+   * CONTADORES
    * ===================================================
    *
-   * Importante:
-   * eles respeitam o período,
-   * mas NÃO o filtro de status.
-   *
-   * Assim, mesmo estando em "Em análise",
-   * você continua vendo quantas existem
-   * nas outras categorias.
+   * Respeitam o período,
+   * mas não o status selecionado.
    */
 
   const novas =
     licitacoesNoPeriodo.filter(
       (item) =>
-        item.status ===
-        "NOVA"
+        item.status === "NOVA"
     ).length;
 
   const emAnalise =
@@ -337,12 +334,48 @@ export default async function OportunidadesPage({
         "EM_ANALISE"
     ).length;
 
+  const interessantes =
+    licitacoesNoPeriodo.filter(
+      (item) =>
+        item.status ===
+        "INTERESSANTE"
+    ).length;
+
   const participando =
     licitacoesNoPeriodo.filter(
       (item) =>
         item.status ===
         "PARTICIPANDO"
     ).length;
+
+  const ganhas =
+    licitacoesNoPeriodo.filter(
+      (item) =>
+        item.status === "GANHA"
+    ).length;
+
+  const perdidas =
+    licitacoesNoPeriodo.filter(
+      (item) =>
+        item.status ===
+        "PERDIDA"
+    ).length;
+
+  const descartadas =
+    licitacoesNoPeriodo.filter(
+      (item) =>
+        item.status ===
+        "DESCARTADA"
+    ).length;
+
+  /*
+   * ===================================================
+   * VALOR POTENCIAL
+   * ===================================================
+   *
+   * Não considera oportunidades
+   * descartadas ou perdidas.
+   */
 
   const valorPotencial =
     licitacoesNoPeriodo
@@ -373,7 +406,7 @@ export default async function OportunidadesPage({
 
   /*
    * ===================================================
-   * SEGUNDO: FILTRO DE STATUS
+   * FILTRO DE STATUS
    * ===================================================
    */
 
@@ -388,10 +421,8 @@ export default async function OportunidadesPage({
 
   /*
    * ===================================================
-   * LINKS DE STATUS
+   * LINKS
    * ===================================================
-   *
-   * Preservam as datas selecionadas.
    */
 
   function hrefStatus(
@@ -448,7 +479,10 @@ export default async function OportunidadesPage({
   return (
     <main className="min-h-screen bg-slate-50">
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-        {/* CABEÇALHO */}
+
+        {/* =================================================
+            CABEÇALHO
+        ================================================= */}
 
         <section className="mb-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
@@ -474,14 +508,14 @@ export default async function OportunidadesPage({
           </div>
         </section>
 
-        {/* INDICADORES CLICÁVEIS */}
+        {/* =================================================
+            CARDS EXECUTIVOS
+        ================================================= */}
 
         <section className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <Resumo
             titulo="Novas"
-            valor={
-              String(novas)
-            }
+            valor={String(novas)}
             subtitulo="Aguardando análise"
             href={
               hrefStatus(
@@ -498,9 +532,7 @@ export default async function OportunidadesPage({
           <Resumo
             titulo="Em análise"
             valor={
-              String(
-                emAnalise
-              )
+              String(emAnalise)
             }
             subtitulo="Em avaliação"
             href={
@@ -518,9 +550,7 @@ export default async function OportunidadesPage({
           <Resumo
             titulo="Participando"
             valor={
-              String(
-                participando
-              )
+              String(participando)
             }
             subtitulo="Processos ativos"
             href={
@@ -554,7 +584,9 @@ export default async function OportunidadesPage({
           />
         </section>
 
-        {/* FILTROS */}
+        {/* =================================================
+            FILTROS
+        ================================================= */}
 
         <section className="mb-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="mb-4">
@@ -563,18 +595,20 @@ export default async function OportunidadesPage({
             </h2>
 
             <p className="mt-1 text-sm text-slate-500">
-              Filtre por status e pela data
-              de encerramento das propostas.
+              Filtre por status e pela
+              data de encerramento das
+              propostas.
             </p>
           </div>
 
-          {/* FILTROS RÁPIDOS DE STATUS */}
+          {/* STATUS */}
 
           <div className="mb-5 flex flex-wrap gap-2">
+
+            {/* TODAS */}
+
             <Link
-              href={
-                hrefStatus()
-              }
+              href={hrefStatus()}
               className={
                 !statusSelecionado
                   ? "rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
@@ -587,6 +621,8 @@ export default async function OportunidadesPage({
               }
               )
             </Link>
+
+            {/* NOVAS */}
 
             <Link
               href={
@@ -603,6 +639,8 @@ export default async function OportunidadesPage({
             >
               Novas ({novas})
             </Link>
+
+            {/* EM ANÁLISE */}
 
             <Link
               href={
@@ -621,6 +659,27 @@ export default async function OportunidadesPage({
               {emAnalise})
             </Link>
 
+            {/* INTERESSANTES */}
+
+            <Link
+              href={
+                hrefStatus(
+                  "INTERESSANTE"
+                )
+              }
+              className={
+                statusSelecionado ===
+                "INTERESSANTE"
+                  ? "rounded-full bg-violet-600 px-4 py-2 text-sm font-semibold text-white"
+                  : "rounded-full border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-semibold text-violet-700 transition hover:bg-violet-100"
+              }
+            >
+              Interessantes (
+              {interessantes})
+            </Link>
+
+            {/* PARTICIPANDO */}
+
             <Link
               href={
                 hrefStatus(
@@ -637,9 +696,67 @@ export default async function OportunidadesPage({
               Participando (
               {participando})
             </Link>
+
+            {/* GANHAS */}
+
+            <Link
+              href={
+                hrefStatus(
+                  "GANHA"
+                )
+              }
+              className={
+                statusSelecionado ===
+                "GANHA"
+                  ? "rounded-full bg-emerald-600 px-4 py-2 text-sm font-semibold text-white"
+                  : "rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100"
+              }
+            >
+              Ganhas ({ganhas})
+            </Link>
+
+            {/* PERDIDAS */}
+
+            <Link
+              href={
+                hrefStatus(
+                  "PERDIDA"
+                )
+              }
+              className={
+                statusSelecionado ===
+                "PERDIDA"
+                  ? "rounded-full bg-red-600 px-4 py-2 text-sm font-semibold text-white"
+                  : "rounded-full border border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100"
+              }
+            >
+              Perdidas (
+              {perdidas})
+            </Link>
+
+            {/* DESCARTADAS */}
+
+            <Link
+              href={
+                hrefStatus(
+                  "DESCARTADA"
+                )
+              }
+              className={
+                statusSelecionado ===
+                "DESCARTADA"
+                  ? "rounded-full bg-slate-700 px-4 py-2 text-sm font-semibold text-white"
+                  : "rounded-full border border-slate-300 bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-200"
+              }
+            >
+              Descartadas (
+              {descartadas})
+            </Link>
           </div>
 
-          {/* FILTRO DE DATA */}
+          {/* =================================================
+              DATA
+          ================================================= */}
 
           <form
             method="GET"
@@ -714,7 +831,9 @@ export default async function OportunidadesPage({
           </form>
         </section>
 
-        {/* LISTA */}
+        {/* =================================================
+            LISTA
+        ================================================= */}
 
         <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
           <div className="flex flex-col gap-3 border-b border-slate-100 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
@@ -742,6 +861,7 @@ export default async function OportunidadesPage({
 
             {possuiFiltro && (
               <div className="flex flex-wrap gap-2">
+
                 {statusSelecionado && (
                   <span
                     className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${classeStatus(
@@ -772,6 +892,7 @@ export default async function OportunidadesPage({
             />
           ) : (
             <div className="divide-y divide-slate-100">
+
               {licitacoes.map(
                 (
                   licitacao
@@ -783,7 +904,13 @@ export default async function OportunidadesPage({
                     className="p-6 transition hover:bg-slate-50/70"
                   >
                     <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+
+                      {/* CONTEÚDO */}
+
                       <div className="min-w-0 flex-1">
+
+                        {/* TAGS */}
+
                         <div className="mb-3 flex flex-wrap items-center gap-2">
                           <span
                             className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${classeStatus(
@@ -813,11 +940,15 @@ export default async function OportunidadesPage({
                           )}
                         </div>
 
+                        {/* TÍTULO */}
+
                         <h3 className="max-w-4xl text-base font-semibold leading-6 text-slate-900 sm:text-lg">
                           {
                             licitacao.titulo
                           }
                         </h3>
+
+                        {/* DADOS */}
 
                         <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
                           <Informacao
@@ -835,12 +966,8 @@ export default async function OportunidadesPage({
                                 licitacao.municipio,
                                 licitacao.uf,
                               ]
-                                .filter(
-                                  Boolean
-                                )
-                                .join(
-                                  " / "
-                                ) ||
+                                .filter(Boolean)
+                                .join(" / ") ||
                               "Não informado"
                             }
                           />
@@ -864,6 +991,8 @@ export default async function OportunidadesPage({
                           />
                         </div>
                       </div>
+
+                      {/* AÇÕES */}
 
                       <div className="flex shrink-0 flex-wrap items-center gap-2">
                         <StatusOportunidade
@@ -915,7 +1044,9 @@ function Resumo({
   cor = "slate",
 }: {
   titulo: string;
+
   valor: string;
+
   subtitulo: string;
 
   href?: string;
@@ -981,6 +1112,12 @@ function Resumo({
   );
 }
 
+/*
+ * =====================================================
+ * INFORMAÇÃO
+ * =====================================================
+ */
+
 function Informacao({
   titulo,
   valor,
@@ -1001,6 +1138,12 @@ function Informacao({
   );
 }
 
+/*
+ * =====================================================
+ * EMPTY STATE
+ * =====================================================
+ */
+
 function EmptyState({
   filtrado,
 }: {
@@ -1009,6 +1152,7 @@ function EmptyState({
   return (
     <div className="flex min-h-[320px] items-center justify-center px-6 py-12">
       <div className="max-w-md text-center">
+
         <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-50">
           <svg
             viewBox="0 0 24 24"
