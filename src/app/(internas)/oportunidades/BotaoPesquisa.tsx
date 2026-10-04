@@ -198,9 +198,7 @@ export default function BotaoPesquisa() {
   const [
     termo,
     setTermo,
-  ] = useState(
-    "medico"
-  );
+  ] = useState("");
 
   const [
     uf,
@@ -593,7 +591,7 @@ export default function BotaoPesquisa() {
                         .value
                     )
                   }
-                  placeholder="Ex.: médico"
+                  placeholder="Ex.: fisioterapia, ultrassom, equipamento hospitalar..."
                   className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm font-medium text-slate-900 shadow-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50"
                 />
 
